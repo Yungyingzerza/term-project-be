@@ -29,6 +29,7 @@ const app = express();
 
 //import routes
 import exampleRouter from "./controllers/example.routes";
+import feedRouter from "./controllers/feed.routes";
 
 //setup middlewares
 app.use(cookieParser());
@@ -55,6 +56,7 @@ app.get("/", (req, res) => {
 });
 
 app.use("/example", exampleRouter);
+app.use("/feed", feedRouter);
 
 //-=-=-=-=-should edit above this line to add your routes-=-=-=-=-//
 
