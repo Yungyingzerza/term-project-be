@@ -1,0 +1,17 @@
+{
+  "scripts": {
+    "dev": "nodemon --watch src --ext ts,json --exec \"bun run src/index.ts\""
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "minio": "^8.0.5",
+    "mongoose": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.1",
+    "nodemon": "^3.1.10"
+  }
+}
