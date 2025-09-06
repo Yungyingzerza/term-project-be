@@ -1,9 +1,7 @@
 import { Request, Response } from "express";
 import { minioClient } from "../lib/minio";
 
-const MIN_CHUNK_SIZE = 64 * 1024; // 64 KiB
-const DEFAULT_CHUNK_SIZE = 256 * 1024; // 256 KiB works better on 4G
-const MAX_CHUNK_SIZE = 2 * 1024 * 1024; // 2 MiB
+const CHUNK_SIZE = 1 * 1024 * 1024; // 1 MiB for better CDN caching
 
 function parseRange(rangeHeader: string | undefined, size: number) {
   if (!rangeHeader) return null;
@@ -13,19 +11,6 @@ function parseRange(rangeHeader: string | undefined, size: number) {
   const end = m[2] ? parseInt(m[2], 10) : size - 1;
   if (Number.isNaN(start) || Number.isNaN(end)) return null;
   return { start, end } as const;
-}
-
-function determineChunkSize(req: Request): number {
-  const q = req.query.cs as string | undefined;
-  if (q) {
-    const n = parseInt(q, 10);
-    if (!Number.isNaN(n)) {
-      return Math.min(Math.max(n, MIN_CHUNK_SIZE), MAX_CHUNK_SIZE);
-    }
-  }
-  const saveData = (req.headers["save-data"] || "").toString().toLowerCase();
-  if (saveData === "on") return 128 * 1024;
-  return DEFAULT_CHUNK_SIZE;
 }
 
 function pickContentType(objectKey: string, fallback: string): string {
@@ -74,7 +59,7 @@ export async function streamObject(req: Request, res: Response) {
     }
     const requestedEnd = parsed?.end ?? size - 1;
     const end = Math.min(
-      start + determineChunkSize(req) - 1,
+      start + CHUNK_SIZE - 1,
       requestedEnd,
       size - 1
     );
@@ -91,6 +76,7 @@ export async function streamObject(req: Request, res: Response) {
     res.setHeader("Accept-Ranges", "bytes");
     res.setHeader("Content-Length", String(length));
     res.setHeader("Content-Type", contentType);
+    res.setHeader("Vary", "Range");
     if ((stat as any).etag) res.setHeader("ETag", (stat as any).etag);
     if ((stat as any).lastModified)
       res.setHeader(
