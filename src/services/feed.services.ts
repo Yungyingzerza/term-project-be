@@ -59,7 +59,7 @@ const SAMPLE_DATA: PostDTO[] = [
     thumbnail:
       "https://images.unsplash.com/photo-1518779578993-ec3579fee39f?q=80&w=1600&auto=format&fit=crop",
     tags: ["#ai", "#setup", "#aesthetic"],
-    videoSrc: "/test.mp4",
+    videoSrc: "http://localhost:8000/media/firstbucket/test.mp4",
     visibility: "Public",
     allowComments: true,
     createdAt: iso(new Date(baseNow.getTime() - 1 * 3600_000)),
@@ -87,7 +87,7 @@ const SAMPLE_DATA: PostDTO[] = [
     thumbnail:
       "https://images.unsplash.com/photo-1541592106381-b31e9677c0e5?q=80&w=1600&auto=format&fit=crop",
     tags: ["#ramen", "#hack", "#homecooking"],
-    videoSrc: "/Download.mp4",
+    videoSrc: "http://localhost:8000/media/firstbucket/Download.mp4",
     visibility: "Friends",
     allowComments: true,
     createdAt: iso(new Date(baseNow.getTime() - 2 * 3600_000)),
@@ -115,7 +115,7 @@ const SAMPLE_DATA: PostDTO[] = [
     thumbnail:
       "https://images.unsplash.com/photo-1519823551278-64ac92734fb1?q=80&w=1600&auto=format&fit=crop",
     tags: ["#wellness", "#stretch", "#desk"],
-    videoSrc: "/Download (1).mp4",
+    videoSrc: "http://localhost:8000/media/firstbucket/Download (1).mp4",
     visibility: "Organizations",
     allowComments: true,
     orgViewIds: [
@@ -147,7 +147,7 @@ const SAMPLE_DATA: PostDTO[] = [
     thumbnail:
       "https://images.unsplash.com/photo-1499346030926-9a72daac6c63?q=80&w=1600&auto=format&fit=crop",
     tags: ["#city", "#timelapse", "#vibes"],
-    videoSrc: "/Download (2).mp4",
+    videoSrc: "http://localhost:8000/media/firstbucket/Download (2).mp4",
     visibility: "Private",
     allowComments: false,
     createdAt: iso(new Date(baseNow.getTime() - 4 * 3600_000)),
@@ -175,7 +175,7 @@ const SAMPLE_DATA: PostDTO[] = [
     thumbnail:
       "https://images.unsplash.com/photo-1499346030926-9a72daac6c63?q=80&w=1600&auto=format&fit=crop",
     tags: ["#example"],
-    videoSrc: "/mov_bbb.mp4",
+    videoSrc: "http://localhost:8000/media/firstbucket/mov_bbb.mp4",
     visibility: "Public",
     allowComments: true,
     createdAt: iso(new Date(baseNow.getTime() - 5 * 3600_000)),
@@ -210,7 +210,9 @@ export async function getFeed(req: Request, res: Response) {
     const algoRaw = (req.query.algo as string) || "for-you";
     const algo = algoRaw === "following" ? "following" : "for-you"; // default to for-you
     const limit = parseLimit(req.query.limit);
-    const start = startIndexFromCursor((req.query.cursor as string) || undefined);
+    const start = startIndexFromCursor(
+      (req.query.cursor as string) || undefined
+    );
 
     // For mock: both algos return same ordering; slot for future differentiation
     const ordered = [...SAMPLE_DATA];
