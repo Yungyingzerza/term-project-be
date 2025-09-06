@@ -59,7 +59,7 @@ const SAMPLE_DATA: PostDTO[] = [
     thumbnail:
       "https://images.unsplash.com/photo-1518779578993-ec3579fee39f?q=80&w=1600&auto=format&fit=crop",
     tags: ["#ai", "#setup", "#aesthetic"],
-    videoSrc: "http://localhost:8000/media/firstbucket/test.mp4",
+    videoSrc: "http://localhost:8000/media/firstbucket/test",
     visibility: "Public",
     allowComments: true,
     createdAt: iso(new Date(baseNow.getTime() - 1 * 3600_000)),
@@ -87,7 +87,7 @@ const SAMPLE_DATA: PostDTO[] = [
     thumbnail:
       "https://images.unsplash.com/photo-1541592106381-b31e9677c0e5?q=80&w=1600&auto=format&fit=crop",
     tags: ["#ramen", "#hack", "#homecooking"],
-    videoSrc: "http://localhost:8000/media/firstbucket/Download.mp4",
+    videoSrc: "http://localhost:8000/media/firstbucket/Download",
     visibility: "Friends",
     allowComments: true,
     createdAt: iso(new Date(baseNow.getTime() - 2 * 3600_000)),
@@ -115,7 +115,7 @@ const SAMPLE_DATA: PostDTO[] = [
     thumbnail:
       "https://images.unsplash.com/photo-1519823551278-64ac92734fb1?q=80&w=1600&auto=format&fit=crop",
     tags: ["#wellness", "#stretch", "#desk"],
-    videoSrc: "http://localhost:8000/media/firstbucket/Download (1).mp4",
+    videoSrc: "http://localhost:8000/media/firstbucket/Download (1)",
     visibility: "Organizations",
     allowComments: true,
     orgViewIds: [
@@ -147,7 +147,7 @@ const SAMPLE_DATA: PostDTO[] = [
     thumbnail:
       "https://images.unsplash.com/photo-1499346030926-9a72daac6c63?q=80&w=1600&auto=format&fit=crop",
     tags: ["#city", "#timelapse", "#vibes"],
-    videoSrc: "http://localhost:8000/media/firstbucket/Download (2).mp4",
+    videoSrc: "http://localhost:8000/media/firstbucket/Download (2)",
     visibility: "Private",
     allowComments: false,
     createdAt: iso(new Date(baseNow.getTime() - 4 * 3600_000)),
@@ -175,7 +175,7 @@ const SAMPLE_DATA: PostDTO[] = [
     thumbnail:
       "https://images.unsplash.com/photo-1499346030926-9a72daac6c63?q=80&w=1600&auto=format&fit=crop",
     tags: ["#example"],
-    videoSrc: "http://localhost:8000/media/firstbucket/mov_bbb.mp4",
+    videoSrc: "http://localhost:8000/media/firstbucket/mov_bbb",
     visibility: "Public",
     allowComments: true,
     createdAt: iso(new Date(baseNow.getTime() - 5 * 3600_000)),

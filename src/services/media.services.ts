@@ -13,37 +13,19 @@ function parseRange(rangeHeader: string | undefined, size: number) {
   return { start, end } as const;
 }
 
-function pickContentType(objectKey: string, fallback: string): string {
-  const lower = objectKey.toLowerCase();
-  if (lower.endsWith(".mp4")) return "video/mp4";
-  if (lower.endsWith(".webm")) return "video/webm";
-  if (lower.endsWith(".m3u8")) return "application/vnd.apple.mpegurl";
-  if (lower.endsWith(".ts")) return "video/mp2t";
-  if (lower.endsWith(".mov")) return "video/quicktime";
-  if (lower.endsWith(".m4s")) return "video/iso.segment";
-  if (lower.endsWith(".mpd")) return "application/dash+xml";
-  return fallback;
-}
-
-function coalesceWildcardParam(val: any): string {
-  if (Array.isArray(val)) return val.join("/");
-  return typeof val === "string" ? val : "";
-}
-
 export async function streamObject(req: Request, res: Response) {
   try {
     const bucket = req.params.bucket;
-    const paramsAny = req.params as any;
-    const objectKey = coalesceWildcardParam(
-      paramsAny.object ?? paramsAny.path ?? paramsAny[0]
-    );
+    const objectKey = req.params.object;
     if (!bucket || !objectKey) {
       return res.status(400).json({ message: "Missing bucket or object key" });
     }
 
-    const stat = await minioClient.statObject(bucket, objectKey);
+    const objectKeyWithExtension = `${objectKey}.mp4`;
+
+    const stat = await minioClient.statObject(bucket, objectKeyWithExtension);
     const size = stat.size as number;
-    const inferred = pickContentType(objectKey, "application/octet-stream");
+    const inferred = "video/mp4";
     const contentType =
       (stat as any).contentType ||
       (stat as any).metaData?.["content-type"] ||
@@ -58,16 +40,12 @@ export async function streamObject(req: Request, res: Response) {
       return res.end();
     }
     const requestedEnd = parsed?.end ?? size - 1;
-    const end = Math.min(
-      start + CHUNK_SIZE - 1,
-      requestedEnd,
-      size - 1
-    );
+    const end = Math.min(start + CHUNK_SIZE - 1, requestedEnd, size - 1);
     const length = end - start + 1;
 
     const stream = await minioClient.getPartialObject(
       bucket,
-      objectKey,
+      objectKeyWithExtension,
       start,
       length
     );

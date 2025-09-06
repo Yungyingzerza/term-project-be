@@ -5,7 +5,7 @@ const mediaRouter = express.Router();
 
 // Proxy stream from MinIO with Range support
 // Example: GET /media/firstbucket/path/to/file.mp4
-mediaRouter.get("/:bucket{/*path}", async (req, res) => {
+mediaRouter.get("/:bucket/:object", async (req, res) => {
   await services.streamObject(req, res);
 });
 
