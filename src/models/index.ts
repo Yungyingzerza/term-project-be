@@ -41,3 +41,6 @@ export type { MessageRead } from "./messageRead.model";
 
 export { FollowModel } from "./follow.model";
 export type { Follow } from "./follow.model";
+
+export { LineAccountModel } from "./lineAccount.model";
+export type { LineAccount } from "./lineAccount.model";
