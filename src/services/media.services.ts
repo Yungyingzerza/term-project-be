@@ -71,3 +71,40 @@ export async function streamObject(req: Request, res: Response) {
     return res.status(500).json({ message: "Failed to stream object" });
   }
 }
+
+export async function photo(req: Request, res: Response) {
+  try {
+    const bucket = "firstbucket";
+    const objectKey = req.params.object + ".jpg";
+    if (!objectKey) {
+      return res.status(400).json({ message: "Missing object key" });
+    }
+
+    const stat = await minioClient.statObject(bucket, objectKey);
+    const size = stat.size as number;
+    const inferred = "image/jpeg";
+    const contentType =
+      (stat as any).contentType ||
+      (stat as any).metaData?.["content-type"] ||
+      inferred;
+
+    const stream = await minioClient.getObject(bucket, objectKey);
+    res.status(200);
+    res.setHeader("Content-Length", String(size));
+    res.setHeader("Content-Type", contentType);
+    if ((stat as any).etag) res.setHeader("ETag", (stat as any).etag);
+    if ((stat as any).lastModified)
+      res.setHeader(
+        "Last-Modified",
+        new Date((stat as any).lastModified).toUTCString()
+      );
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    stream.on("error", () => res.destroy());
+    stream.pipe(res);
+  } catch (err: any) {
+    if (err?.code === "NoSuchKey" || err?.code === "NotFound") {
+      return res.status(404).json({ message: "Photo not found" });
+    }
+    return res.status(500).json({ message: "Failed to get photo" });
+  }
+}
