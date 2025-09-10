@@ -1,8 +1,9 @@
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import axios from "axios";
-import { randomBytes } from "crypto";
+import { randomBytes, createHmac } from "crypto";
 import { UserModel, LineAccountModel } from "../models";
+import { ensureRedis } from "../lib/redis";
 dotenv.config();
 
 function generateState(length = 20) {
@@ -81,6 +82,31 @@ async function authorization(req, res) {
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
+
+    // Persist refresh token metadata in Redis
+    const decoded: any = jwt.decode(refreshToken);
+    const exp = typeof decoded?.exp === "number" ? decoded.exp : Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
+    const hmacSecret = process.env.REFRESH_TOKEN_HMAC_SECRET || process.env.JWT_SECRET || "default_hmac_secret";
+    const hash = createHmac("sha256", hmacSecret).update(refreshToken).digest("hex");
+    const family = `FAM-${randomBytes(6).toString("hex")}`;
+
+    const entry = {
+      uid: String(user.user_id),
+      family,
+      hash,
+      rotated_to: "",
+      revoked: false,
+      exp,
+    };
+
+    try {
+      const client = await ensureRedis();
+      const key = `rt:${family}:${hash}`;
+      const ttl = Math.max(1, exp - Math.floor(Date.now() / 1000));
+      await client.set(key, JSON.stringify(entry), { EX: ttl });
+    } catch (e) {
+      console.error("Failed to store refresh token in Redis:", e?.message || e);
+    }
 
     return res
       .cookie("accessToken", jwtToken, {
