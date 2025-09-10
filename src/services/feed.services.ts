@@ -342,87 +342,151 @@ function startIndexFromCursor(cursor?: string | null): number {
   return 0;
 }
 
+// export async function getFeed(req: Request, res: Response) {
+//   try {
+//     const algoRaw = (req.query.algo as string) || "for-you";
+//     const algo = algoRaw === "following" ? "following" : "for-you"; // default to for-you
+//     const limit = parseLimit(req.query.limit);
+//     const start = startIndexFromCursor(
+//       (req.query.cursor as string) || undefined
+//     );
+
+//     // For mock: both algos return same ordering; slot for future differentiation
+//     const ordered = [...SAMPLE_DATA];
+
+//     const items = ordered.slice(start, start + limit);
+//     const endIndex = start + items.length;
+//     const hasMore = endIndex < ordered.length;
+//     const nextCursor = hasMore ? ordered[endIndex - 1].id : null;
+
+//     return res.json({
+//       algo,
+//       items: items,
+//       paging: {
+//         nextCursor,
+//         hasMore,
+//       },
+//     });
+//   } catch (error) {
+//     return res.status(500).json({ message: "Something went wrong!" });
+//   }
+// }
+
+//BELOW THIS IS TEST
+type CursorToken = { createdAt: string; id: string };
+
+function encodeCursor(c: CursorToken): string {
+  return Buffer.from(JSON.stringify(c), "utf8").toString("base64");
+}
+
+function decodeCursor(raw?: string | null): CursorToken | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, "base64").toString("utf8"));
+    if (
+      typeof parsed?.createdAt === "string" &&
+      typeof parsed?.id === "string"
+    ) {
+      return parsed as CursorToken;
+    }
+  } catch {}
+  return null;
+}
+
+// Build a range query for "older than cursor" in a stable desc order
+function buildCursorFilter(cursor: CursorToken | null) {
+  if (!cursor) return {};
+  const createdAt = new Date(cursor.createdAt);
+  const id = cursor.id;
+  return {
+    $or: [
+      { created_at: { $lt: createdAt } },
+      { created_at: createdAt, _id: { $lt: id } },
+    ],
+  };
+}
+
 export async function getFeed(req: Request, res: Response) {
   try {
     const algoRaw = (req.query.algo as string) || "for-you";
-    const algo = algoRaw === "following" ? "following" : "for-you"; // default to for-you
+    const algo = algoRaw === "following" ? "following" : "for-you";
+
     const limit = parseLimit(req.query.limit);
-    // const start = startIndexFromCursor(
-    //   (req.query.cursor as string) || undefined
-    // );
+    const cursor = decodeCursor(req.query.cursor as string | undefined);
 
-    //start at latest cursor
-    const start = 0;
+    // Base filters (adjust to your auth/visibility logic)
+    const baseFilter = { visibility: "Public" as Visibility };
 
-    // For mock: both algos return same ordering; slot for future differentiation
-    // const ordered = [...SAMPLE_DATA];
-    //get real data from db with limit and offset
-    const posts = await PostModel.find({ visibility: "Public" })
-      .sort({ created_at: -1 })
-      .skip(start)
-      .limit(limit)
+    // Apply cursor range if provided
+    const rangeFilter = buildCursorFilter(cursor);
+    const filter = { ...baseFilter, ...rangeFilter };
+
+    const sort = { created_at: -1 as const, _id: -1 as const };
+
+    // Over-fetch by 1 to know if there's another page
+    const posts = await PostModel.find(filter)
+      .sort(sort)
+      .limit(limit + 1)
       .exec();
 
-    if (!posts) {
-      return res.status(404).json({ message: "No posts found" });
-    }
+    const hasMore = posts.length > limit;
+    const pageItems = hasMore ? posts.slice(0, limit) : posts;
 
-    //map to dto
-    const dtoPosts: PostDTO[] = await Promise.all(
-      posts.map(async (post) => {
-        const user = await UserModel.findById(post.user_id);
-        return {
-          id: post._id.toString(),
-          user: {
-            handle: user?.handle || "unknown",
-            name: user?.username || "Unknown User",
-            avatar: user?.picture_url || "https://i.pravatar.cc/100?img=1",
-          },
-          caption: post.caption ?? "",
-          music: post.music ?? "",
-          interactions: {
-            //mock data for now
-            like: Math.floor(Math.random() * 10000),
-            love: Math.floor(Math.random() * 5000),
-            haha: Math.floor(Math.random() * 1000),
-            sad: Math.floor(Math.random() * 500),
-            angry: Math.floor(Math.random() * 300),
-          },
-          comments: Math.floor(Math.random() * 1000),
-          saves: Math.floor(Math.random() * 1000),
-          thumbnail: post.thumbnail ?? "",
-          tags: post.tags,
-          videoSrc: post.video_src,
-          visibility: post.visibility,
-          allowComments: post.allow_comments,
-          createdAt: post.created_at
-            ? post.created_at.toISOString()
-            : new Date().toISOString(),
-          updatedAt: post.updated_at
-            ? post.updated_at.toISOString()
-            : new Date().toISOString(),
-          viewer: {
-            saved: false,
-            reaction: undefined,
-          },
-        };
-      })
-    );
+    // Preload users in batch (fewer roundtrips)
+    const userIds = pageItems.map((p) => p.user_id);
+    const users = await UserModel.find({ _id: { $in: userIds } })
+      .lean()
+      .exec();
+    const userMap = new Map(users.map((u) => [u._id.toString(), u]));
 
-    // const items = ordered.slice(start, start + limit);
-    // const endIndex = start + items.length;
-    // const hasMore = endIndex < ordered.length;
-    // const nextCursor = hasMore ? ordered[endIndex - 1].id : null;
+    const dtoPosts = pageItems.map((post) => {
+      const user = userMap.get(post.user_id.toString());
+      return {
+        id: post._id.toString(),
+        user: {
+          handle: user?.handle || "unknown",
+          name: user?.username || "Unknown User",
+          avatar: user?.picture_url || "https://i.pravatar.cc/100?img=1",
+        },
+        caption: post.caption ?? "",
+        music: post.music ?? "",
+        interactions: {
+          like: 0,
+          love: 0,
+          haha: 0,
+          sad: 0,
+          angry: 0, // TODO: real counts
+        },
+        comments: 0, // TODO
+        saves: 0, // TODO
+        thumbnail: post.thumbnail ?? "",
+        tags: post.tags ?? [],
+        videoSrc: post.video_src ?? "",
+        visibility: post.visibility,
+        allowComments: post.allow_comments,
+        createdAt: post.created_at?.toISOString() ?? new Date().toISOString(),
+        updatedAt: post.updated_at?.toISOString() ?? new Date().toISOString(),
+        viewer: { saved: false, reaction: undefined },
+      };
+    });
+
+    const nextCursor = hasMore
+      ? encodeCursor({
+          createdAt: pageItems[pageItems.length - 1].created_at.toISOString(),
+          id: pageItems[pageItems.length - 1]._id.toString(),
+        })
+      : null;
 
     return res.json({
       algo,
       items: dtoPosts,
       paging: {
-        nextCursor: null, // TODO
-        hasMore: false, // TODO
+        nextCursor,
+        hasMore,
       },
     });
   } catch (error) {
+    console.error(error);
     return res.status(500).json({ message: "Something went wrong!" });
   }
 }
