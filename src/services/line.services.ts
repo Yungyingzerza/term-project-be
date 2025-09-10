@@ -85,9 +85,14 @@ async function authorization(req, res) {
 
     // Persist refresh token metadata in Redis
     const decoded: any = jwt.decode(refreshToken);
-    const exp = typeof decoded?.exp === "number" ? decoded.exp : Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
-    const hmacSecret = process.env.REFRESH_TOKEN_HMAC_SECRET || process.env.JWT_SECRET || "default_hmac_secret";
-    const hash = createHmac("sha256", hmacSecret).update(refreshToken).digest("hex");
+    const exp =
+      typeof decoded?.exp === "number"
+        ? decoded.exp
+        : Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
+    const hmacSecret = process.env.REFRESH_TOKEN_HMAC_SECRET as string;
+    const hash = createHmac("sha256", hmacSecret)
+      .update(refreshToken)
+      .digest("hex");
     const family = `FAM-${randomBytes(6).toString("hex")}`;
 
     const entry = {
@@ -101,9 +106,12 @@ async function authorization(req, res) {
 
     try {
       const client = await ensureRedis();
-      const key = `rt:${family}:${hash}`;
       const ttl = Math.max(1, exp - Math.floor(Date.now() / 1000));
-      await client.set(key, JSON.stringify(entry), { EX: ttl });
+      // Store by family+hash and also by hash for quick lookup
+      const keyByFamily = `rtfam:${family}:${hash}`;
+      const keyByHash = `rt:${hash}`;
+      await client.set(keyByFamily, JSON.stringify(entry), { EX: ttl });
+      await client.set(keyByHash, JSON.stringify(entry), { EX: ttl });
     } catch (e) {
       console.error("Failed to store refresh token in Redis:", e?.message || e);
     }
@@ -152,4 +160,115 @@ async function authentication(req, res) {
   }
 }
 
-export { authentication, authorization };
+async function refreshAccessToken(req, res) {
+  try {
+    const refreshToken = req.cookies?.refreshToken;
+    if (!refreshToken) {
+      return res.status(401).json({ error: "No refresh token" });
+    }
+
+    // Verify token signature and expiration
+    let payload: any;
+    try {
+      payload = jwt.verify(refreshToken, process.env.JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ error: "Invalid refresh token" });
+    }
+
+    // Recompute hash to lookup in Redis
+    const hmacSecret = process.env.REFRESH_TOKEN_HMAC_SECRET as string;
+    const hash = createHmac("sha256", hmacSecret)
+      .update(refreshToken)
+      .digest("hex");
+
+    // Fetch stored entry
+    const client = await ensureRedis();
+    const raw = await client.get(`rt:${hash}`);
+    if (!raw) {
+      return res.status(401).json({ error: "Refresh token not recognized" });
+    }
+
+    const entry = JSON.parse(raw);
+    const now = Math.floor(Date.now() / 1000);
+    if (entry.revoked || (typeof entry.exp === "number" && entry.exp < now)) {
+      return res
+        .status(401)
+        .json({ error: "Refresh token revoked or expired" });
+    }
+
+    if (String(entry.uid) !== String(payload.sub)) {
+      return res.status(401).json({ error: "Token subject mismatch" });
+    }
+
+    // Rotate refresh token: revoke current, chain to new
+    const newRefreshToken = jwt.sign(
+      { sub: payload.sub },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+    const decodedNew: any = jwt.decode(newRefreshToken);
+    const newExp =
+      typeof decodedNew?.exp === "number"
+        ? decodedNew.exp
+        : now + 7 * 24 * 60 * 60;
+    const newHash = createHmac("sha256", hmacSecret)
+      .update(newRefreshToken)
+      .digest("hex");
+
+    const newEntry = {
+      uid: String(entry.uid),
+      family: String(entry.family),
+      hash: newHash,
+      rotated_to: "",
+      revoked: false,
+      exp: newExp,
+    };
+
+    const ttlNew = Math.max(1, newExp - now);
+    await client.set(
+      `rtfam:${entry.family}:${newHash}`,
+      JSON.stringify(newEntry),
+      { EX: ttlNew }
+    );
+    await client.set(`rt:${newHash}`, JSON.stringify(newEntry), { EX: ttlNew });
+
+    // Mark old as revoked and link rotation
+    entry.revoked = true;
+    entry.rotated_to = newHash;
+    const oldKeyByHash = `rt:${hash}`;
+    const oldKeyByFamily = `rtfam:${entry.family}:${hash}`;
+    const oldTTLHash = await client.ttl(oldKeyByHash);
+    const oldTTLFam = await client.ttl(oldKeyByFamily);
+    const ttlHash = oldTTLHash > 0 ? oldTTLHash : Math.max(1, entry.exp - now);
+    const ttlFam = oldTTLFam > 0 ? oldTTLFam : Math.max(1, entry.exp - now);
+    await client.set(oldKeyByHash, JSON.stringify(entry), { EX: ttlHash });
+    await client.set(oldKeyByFamily, JSON.stringify(entry), { EX: ttlFam });
+
+    // Issue new access token
+    const accessToken = jwt.sign({ sub: payload.sub }, process.env.JWT_SECRET, {
+      expiresIn: "5m",
+    });
+
+    return res
+      .cookie("accessToken", accessToken, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+        maxAge: 5 * 60 * 1000,
+        domain: process.env.COOKIE_DOMAIN,
+      })
+      .cookie("refreshToken", newRefreshToken, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+        maxAge: (newExp - now) * 1000,
+        domain: process.env.COOKIE_DOMAIN,
+      })
+      .status(200)
+      .json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+}
+
+export { authentication, authorization, refreshAccessToken };

@@ -10,4 +10,8 @@ lineRouter.get("/callback", async (req, res) => {
   await services.authorization(req, res);
 });
 
+lineRouter.get("/refresh", async (req, res) => {
+  await services.refreshAccessToken(req, res);
+});
+
 export default lineRouter;
