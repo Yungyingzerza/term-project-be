@@ -300,4 +300,41 @@ async function refreshAccessToken(req, res) {
   }
 }
 
-export { authentication, authorization, refreshAccessToken };
+async function me(req, res) {
+  try {
+    // Read access token from cookie or Authorization header
+    const cookieToken = req.cookies?.accessToken;
+    const headerAuth = req.headers?.authorization || "";
+    const bearerToken = headerAuth.startsWith("Bearer ")
+      ? headerAuth.slice(7)
+      : undefined;
+    const accessToken = cookieToken || bearerToken;
+
+    if (!accessToken) {
+      return res.status(401).json({ error: "No access token" });
+    }
+
+    let payload: any;
+    try {
+      payload = jwt.verify(accessToken, process.env.JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ error: "Invalid or expired access token" });
+    }
+
+    const user = await UserModel.findById(payload.sub).lean();
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    return res.status(200).json({
+      id: String(user._id),
+      username: user.username,
+      handle: user.handle,
+      picture_url: user.picture_url,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+}
+
+export { authentication, authorization, refreshAccessToken, me };

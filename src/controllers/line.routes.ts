@@ -14,4 +14,8 @@ lineRouter.get("/refresh", async (req, res) => {
   await services.refreshAccessToken(req, res);
 });
 
+lineRouter.get("/me", async (req, res) => {
+  await services.me(req, res);
+});
+
 export default lineRouter;
