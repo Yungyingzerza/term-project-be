@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import type { ReactionKey, Visibility } from "../models/enums";
+import { PostModel, UserModel } from "../models";
 
 type UserMeta = {
   handle: string;
@@ -320,7 +321,7 @@ const SAMPLE_DATA: PostDTO[] = [
   },
 ];
 
-function parseLimit(raw: unknown, def = 10, min = 1, max = 50) {
+function parseLimit(raw: unknown, def = 5, min = 1, max = 10) {
   const n = typeof raw === "string" ? parseInt(raw, 10) : def;
   if (Number.isNaN(n)) return def;
   return Math.min(Math.max(n, min), max);
@@ -346,24 +347,79 @@ export async function getFeed(req: Request, res: Response) {
     const algoRaw = (req.query.algo as string) || "for-you";
     const algo = algoRaw === "following" ? "following" : "for-you"; // default to for-you
     const limit = parseLimit(req.query.limit);
-    const start = startIndexFromCursor(
-      (req.query.cursor as string) || undefined
-    );
+    // const start = startIndexFromCursor(
+    //   (req.query.cursor as string) || undefined
+    // );
+
+    //start at latest cursor
+    const start = 0;
 
     // For mock: both algos return same ordering; slot for future differentiation
-    const ordered = [...SAMPLE_DATA];
+    // const ordered = [...SAMPLE_DATA];
+    //get real data from db with limit and offset
+    const posts = await PostModel.find({ visibility: "Public" })
+      .sort({ created_at: -1 })
+      .skip(start)
+      .limit(limit)
+      .exec();
 
-    const items = ordered.slice(start, start + limit);
-    const endIndex = start + items.length;
-    const hasMore = endIndex < ordered.length;
-    const nextCursor = hasMore ? ordered[endIndex - 1].id : null;
+    if (!posts) {
+      return res.status(404).json({ message: "No posts found" });
+    }
+
+    //map to dto
+    const dtoPosts: PostDTO[] = await Promise.all(
+      posts.map(async (post) => {
+        const user = await UserModel.findById(post.user_id);
+        return {
+          id: post._id.toString(),
+          user: {
+            handle: user?.handle || "unknown",
+            name: user?.username || "Unknown User",
+            avatar: user?.picture_url || "https://i.pravatar.cc/100?img=1",
+          },
+          caption: post.caption ?? "",
+          music: post.music ?? "",
+          interactions: {
+            //mock data for now
+            like: Math.floor(Math.random() * 10000),
+            love: Math.floor(Math.random() * 5000),
+            haha: Math.floor(Math.random() * 1000),
+            sad: Math.floor(Math.random() * 500),
+            angry: Math.floor(Math.random() * 300),
+          },
+          comments: Math.floor(Math.random() * 1000),
+          saves: Math.floor(Math.random() * 1000),
+          thumbnail: post.thumbnail ?? "",
+          tags: post.tags,
+          videoSrc: post.video_src,
+          visibility: post.visibility,
+          allowComments: post.allow_comments,
+          createdAt: post.created_at
+            ? post.created_at.toISOString()
+            : new Date().toISOString(),
+          updatedAt: post.updated_at
+            ? post.updated_at.toISOString()
+            : new Date().toISOString(),
+          viewer: {
+            saved: false,
+            reaction: undefined,
+          },
+        };
+      })
+    );
+
+    // const items = ordered.slice(start, start + limit);
+    // const endIndex = start + items.length;
+    // const hasMore = endIndex < ordered.length;
+    // const nextCursor = hasMore ? ordered[endIndex - 1].id : null;
 
     return res.json({
       algo,
-      items,
+      items: dtoPosts,
       paging: {
-        nextCursor,
-        hasMore,
+        nextCursor: null, // TODO
+        hasMore: false, // TODO
       },
     });
   } catch (error) {

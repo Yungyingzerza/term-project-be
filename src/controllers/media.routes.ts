@@ -31,12 +31,12 @@ const upload = multer({
   limits: { fileSize: 1024 * 1024 * 1024 }, // 1GB cap
 });
 
-mediaRouter.get("/photo/:object", async (req, res) => {
+mediaRouter.get("/photo/:user/:postId/:object", async (req, res) => {
   await services.photo(req, res);
 });
 // Proxy stream from MinIO with Range support
 // Example: GET /media/firstbucket/path/to/file.mp4
-mediaRouter.get("/:bucket/:object", async (req, res) => {
+mediaRouter.get("/:user/:postId/:object", async (req, res) => {
   await services.streamObject(req, res);
 });
 

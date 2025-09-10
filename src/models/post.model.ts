@@ -14,15 +14,22 @@ const postSchema = new Schema(
     comments_count: { type: Number, default: 0 },
     saves_count: { type: Number, default: 0 },
     thumbnail: { type: String },
-    tags: { type: [Schema.Types.Mixed], default: undefined },
+    tags: { type: [Schema.Types.Mixed], default: [] },
     video_src: { type: String, required: true },
     visibility: {
       type: String,
       required: true,
-      enum: ["Public", "Friends", "Private", "Organizations"] satisfies Visibility[],
+      enum: [
+        "Public",
+        "Friends",
+        "Private",
+        "Organizations",
+      ] satisfies Visibility[],
       default: "Public",
     },
     allow_comments: { type: Boolean, default: true },
+    created_at: { type: Date, default: () => new Date() },
+    updated_at: { type: Date, default: () => new Date() },
   },
   {
     collection: "posts",
@@ -32,6 +39,7 @@ const postSchema = new Schema(
 
 postSchema.index({ created_at: 1 }, { name: "idx_posts_created_at" });
 
-export type Post = InferSchemaType<typeof postSchema> & { _id: Schema.Types.ObjectId };
+export type Post = InferSchemaType<typeof postSchema> & {
+  _id: Schema.Types.ObjectId;
+};
 export const PostModel = model("Post", postSchema);
-

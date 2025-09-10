@@ -7,6 +7,27 @@ import { promisify } from "util";
 import { spawn } from "child_process";
 
 const unlinkAsync = promisify(fs.unlink);
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function safeUnlink(p?: string, label?: string) {
+  if (!p) return;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await fs.promises.unlink(p);
+      return;
+    } catch (err: any) {
+      if (err?.code === "ENOENT") return; // already gone
+      if (err?.code === "EBUSY" || err?.code === "EPERM") {
+        // transient lock; backoff and retry
+        await wait(150 * attempt);
+        continue;
+      }
+      // Log and stop retrying on other errors
+      console.warn(`Failed to unlink ${label || "file"} at ${p}:`, err);
+      return;
+    }
+  }
+}
 
 const CHUNK_SIZE = 1 * 1024 * 1024; // 1 MiB for better CDN caching
 
@@ -22,13 +43,16 @@ function parseRange(rangeHeader: string | undefined, size: number) {
 
 export async function streamObject(req: Request, res: Response) {
   try {
-    const bucket = req.params.bucket;
-    const objectKey = req.params.object;
-    if (!bucket || !objectKey) {
+    const bucket = "users";
+    const owner = req.params.user;
+    const postId = req.params.postId;
+    const objectKeyBase = req.params.object;
+
+    if (!bucket || !objectKeyBase) {
       return res.status(400).json({ message: "Missing bucket or object key" });
     }
 
-    const objectKeyWithExtension = `${objectKey}.mp4`;
+    const objectKeyWithExtension = `${owner}/${postId}/${objectKeyBase}.mp4`;
 
     const stat = await minioClient.statObject(bucket, objectKeyWithExtension);
     const size = stat.size as number;
@@ -81,11 +105,15 @@ export async function streamObject(req: Request, res: Response) {
 
 export async function photo(req: Request, res: Response) {
   try {
-    const bucket = "firstbucket";
-    const objectKey = req.params.object + ".jpg";
-    if (!objectKey) {
+    const bucket = "users";
+    const owner = req.params.user;
+    const postId = req.params.postId;
+    const objectKeyBase = req.params.object;
+
+    if (!objectKeyBase) {
       return res.status(400).json({ message: "Missing object key" });
     }
+    const objectKey = `${owner}/${postId}/${objectKeyBase}.jpg`;
 
     const stat = await minioClient.statObject(bucket, objectKey);
     const size = stat.size as number;
@@ -234,18 +262,54 @@ function runFfmpeg(
   });
 }
 
+function extractThumbnail(
+  input: string,
+  output: string,
+  opts: { height: number; ss?: number } = { height: 720 }
+) {
+  const { height, ss } = opts;
+  const args = [
+    "-y",
+    ...(ss ? ["-ss", String(ss)] : ["-ss", "0.5"]),
+    "-i",
+    input,
+    "-vf",
+    `scale=-2:${height}`,
+    "-frames:v",
+    "1",
+    "-q:v",
+    "2",
+    output,
+  ];
+
+  return new Promise<void>((resolve, reject) => {
+    const proc = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    proc.stderr.on("data", (d) => (stderr += d.toString()));
+    proc.on("close", (code) => {
+      if (code === 0) return resolve();
+      reject(new Error(stderr || `ffmpeg (thumbnail) exited ${code}`));
+    });
+  });
+}
+
 async function ensureBucket(bucket: string) {
   const exists = await minioClient.bucketExists(bucket).catch(() => false);
   if (!exists) await minioClient.makeBucket(bucket, "us-east-1");
 }
 
 export async function uploadVideo(req: Request, res: Response) {
+  let inPath: string | undefined;
+  let outPath: string | undefined;
+  let thumbPath: string | undefined;
   try {
     const reqAny = req as any;
     if (!reqAny.user?.id)
       return res.status(401).json({ message: "Unauthorized" });
     const file = reqAny.file as Express.Multer.File | undefined;
     if (!file) return res.status(400).json({ message: "Missing file 'video'" });
+    inPath = file.path;
+    const userId = String(reqAny.user.id);
 
     // 1) Create a Post first to get postId
     const { caption, music, visibility, allowComments } = req.body as any;
@@ -254,7 +318,7 @@ export async function uploadVideo(req: Request, res: Response) {
       caption: caption || "",
       music: music || "",
       video_src: "temp",
-      visibility: visibility || "Public",
+      visibility: "Private",
       allow_comments:
         typeof allowComments === "string"
           ? allowComments === "true"
@@ -264,7 +328,7 @@ export async function uploadVideo(req: Request, res: Response) {
 
     // 2) Probe original
     const info = await ffprobe(file.path);
-    const outPath = path.join(path.dirname(file.path), `${postId}.mp4`);
+    outPath = path.join(path.dirname(file.path), `${postId}.mp4`);
 
     // 3) Transcode with requested parameters based on original
     await runFfmpeg(file.path, outPath, {
@@ -274,26 +338,43 @@ export async function uploadVideo(req: Request, res: Response) {
     });
 
     // 4) Upload to MinIO
-    const bucket = process.env.MINIO_BUCKET || "firstbucket";
+    const bucket = process.env.MINIO_BUCKET || "users";
     await ensureBucket(bucket);
-    const objectName = `${postId}.mp4`;
+    const basePath = `${userId}/${postId}/${postId}`;
+    const objectName = `${basePath}.mp4`;
     const meta = { "Content-Type": "video/mp4" } as any;
     await minioClient.fPutObject(bucket, objectName, outPath, meta);
 
-    // 5) Update Post with video_src and maybe thumbnail later
-    const video_src = `${req.protocol}://${req.get(
+    // 5) Generate and upload thumbnail (JPEG from near first frame)
+    const thumbHeight = Math.min(720, info.height || 720);
+    thumbPath = path.join(path.dirname(outPath), `${postId}.jpg`);
+    try {
+      await extractThumbnail(outPath, thumbPath, {
+        height: thumbHeight,
+        ss: 0.5,
+      });
+      const thumbMeta = { "Content-Type": "image/jpeg" } as any;
+      await minioClient.fPutObject(
+        bucket,
+        `${basePath}.jpg`,
+        thumbPath,
+        thumbMeta
+      );
+    } catch (e) {
+      console.warn("thumbnail generation/upload failed:", e);
+    }
+
+    // 6) Update Post with video_src and thumbnail
+    const video_src = `${req.protocol}://${req.get("host")}/media/${basePath}`;
+    const thumbnail = `${req.protocol}://${req.get(
       "host"
-    )}/media/${bucket}/${postId}`;
+    )}/media/photo/${basePath}`;
     post.video_src = video_src;
+    post.thumbnail = thumbnail;
+    post.visibility = visibility || "Public";
     await post.save();
 
-    console.log("delete", file.path, outPath);
-
-    // 6) Cleanup temp files
-    try {
-      await unlinkAsync(file.path);
-      await unlinkAsync(outPath);
-    } catch {}
+    // Cleanup is handled in finally
 
     return res.status(201).json({ postId, post });
   } catch (err: any) {
@@ -302,5 +383,10 @@ export async function uploadVideo(req: Request, res: Response) {
       message: "Failed to upload",
       error: err?.message || String(err),
     });
+  } finally {
+    // Always attempt to clean up temp files
+    await safeUnlink(inPath, "upload temp");
+    await safeUnlink(outPath, "transcoded temp");
+    await safeUnlink(thumbPath, "thumbnail temp");
   }
 }
