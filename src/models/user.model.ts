@@ -7,7 +7,6 @@ const userSchema = new Schema(
     picture_url: { type: String },
     // Optional denormalized list of emails (primary or all). See user_emails collection for normalized records.
     emails: { type: [Schema.Types.Mixed], default: undefined },
-    password: { type: String, required: true },
   },
   {
     collection: "users",

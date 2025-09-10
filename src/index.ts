@@ -19,6 +19,7 @@ const app = express();
 
 //import routes
 import exampleRouter from "./controllers/example.routes";
+import lineRouter from "./controllers/line.routes";
 import feedRouter from "./controllers/feed.routes";
 import mediaRouter from "./controllers/media.routes";
 
@@ -48,6 +49,7 @@ app.get("/", (req, res) => {
 });
 
 app.use("/example", exampleRouter);
+app.use("/line", lineRouter);
 app.use("/feed", feedRouter);
 app.use("/media", mediaRouter);
 
