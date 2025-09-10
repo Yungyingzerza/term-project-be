@@ -190,10 +190,39 @@ async function refreshAccessToken(req, res) {
 
     const entry = JSON.parse(raw);
     const now = Math.floor(Date.now() / 1000);
-    if (entry.revoked || (typeof entry.exp === "number" && entry.exp < now)) {
+    if (entry.revoked) {
+      try {
+        for await (const key of client.scanIterator({
+          MATCH: `rtfam:${entry.family}:*`,
+          COUNT: 100,
+        })) {
+          const k = String(key);
+          const parts = k.split(":");
+          const tokenHash = parts[2];
+          await client.del(k);
+          if (tokenHash) await client.del(`rt:${tokenHash}`);
+        }
+      } catch (e) {
+        console.error("Failed to purge family tokens:", e?.message || e);
+      }
       return res
+        .clearCookie("accessToken", {
+          domain: process.env.COOKIE_DOMAIN,
+          httpOnly: true,
+          sameSite: "lax",
+          secure: process.env.NODE_ENV === "production",
+        })
+        .clearCookie("refreshToken", {
+          domain: process.env.COOKIE_DOMAIN,
+          httpOnly: true,
+          sameSite: "lax",
+          secure: process.env.NODE_ENV === "production",
+        })
         .status(401)
-        .json({ error: "Refresh token revoked or expired" });
+        .json({ error: "Refresh token reuse detected; family revoked" });
+    }
+    if (typeof entry.exp === "number" && entry.exp < now) {
+      return res.status(401).json({ error: "Refresh token expired" });
     }
 
     if (String(entry.uid) !== String(payload.sub)) {
