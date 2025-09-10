@@ -1,7 +1,9 @@
 import express from "express";
 import * as services from "../services/media.services";
+import getUserIdFromToken from "../middlewares/getUserIdFromToken";
 
 const mediaRouter = express.Router();
+mediaRouter.use(getUserIdFromToken);
 
 mediaRouter.get("/photo/:object", async (req, res) => {
   await services.photo(req, res);
