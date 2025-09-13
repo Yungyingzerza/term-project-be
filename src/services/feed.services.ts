@@ -321,3 +321,76 @@ export async function removeReaction(req: Request, res: Response) {
     return res.status(500).json({ message: "Failed to remove reaction" });
   }
 }
+
+export async function savePost(req: Request, res: Response) {
+  try {
+    const reqAny = req as any;
+    const userId = reqAny.user?.id;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+    const { postId } = req.params as { postId: string };
+    const post = await PostModel.findById(postId).exec();
+    if (!post) return res.status(404).json({ message: "Post not found" });
+
+    // Try create save; if it already exists, don't increment
+    let created = false;
+    try {
+      await PostSaveModel.create({ post_id: postId, user_id: userId });
+      created = true;
+    } catch (err: any) {
+      if (!(err?.code === 11000)) throw err; // other errors bubble up
+    }
+
+    if (created) {
+      await PostModel.findByIdAndUpdate(
+        postId,
+        { $inc: { saves_count: 1 } },
+        { new: false }
+      ).exec();
+    }
+
+    const updated = await PostModel.findById(postId).lean().exec();
+    return res.status(200).json({
+      postId,
+      saves: updated?.saves_count ?? 0,
+      viewer: { saved: true },
+    });
+  } catch (error) {
+    console.error("savePost error", error);
+    return res.status(500).json({ message: "Failed to save post" });
+  }
+}
+
+export async function removeSave(req: Request, res: Response) {
+  try {
+    const reqAny = req as any;
+    const userId = reqAny.user?.id;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+    const { postId } = req.params as { postId: string };
+    const post = await PostModel.findById(postId).exec();
+    if (!post) return res.status(404).json({ message: "Post not found" });
+
+    const existing = await PostSaveModel.findOne({ post_id: postId, user_id: userId }).exec();
+    if (existing) {
+      await Promise.all([
+        PostSaveModel.deleteOne({ _id: existing._id }).exec(),
+        PostModel.findByIdAndUpdate(
+          postId,
+          { $inc: { saves_count: -1 } },
+          { new: false }
+        ).exec(),
+      ]);
+    }
+
+    const updated = await PostModel.findById(postId).lean().exec();
+    return res.status(200).json({
+      postId,
+      saves: updated?.saves_count ?? 0,
+      viewer: { saved: false },
+    });
+  } catch (error) {
+    console.error("removeSave error", error);
+    return res.status(500).json({ message: "Failed to remove save" });
+  }
+}

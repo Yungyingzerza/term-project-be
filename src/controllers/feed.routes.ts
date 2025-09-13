@@ -19,4 +19,14 @@ feedRouter.delete("/:postId/reaction", async (req, res) => {
   await services.removeReaction(req, res);
 });
 
+// PUT /feed/:postId/save
+feedRouter.put("/:postId/save", async (req, res) => {
+  await services.savePost(req, res);
+});
+
+// DELETE /feed/:postId/save
+feedRouter.delete("/:postId/save", async (req, res) => {
+  await services.removeSave(req, res);
+});
+
 export default feedRouter;
