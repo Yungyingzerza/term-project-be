@@ -34,7 +34,7 @@ app.use(
       "https://skillswap.yungying.com",
       "https://fs-g03.iecmu.com",
     ],
-    methods: ["GET", "POST", "PATCH", "DELETE"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
   })
 );

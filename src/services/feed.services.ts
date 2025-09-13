@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import type { ReactionKey, Visibility } from "../models/enums";
-import { PostModel, UserModel } from "../models";
+import { PostModel, PostReactionModel, UserModel } from "../models";
 
 type UserMeta = {
   handle: string;
@@ -488,5 +488,134 @@ export async function getFeed(req: Request, res: Response) {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ message: "Something went wrong!" });
+  }
+}
+
+function reactionField(key: ReactionKey) {
+  return `${key}_count` as const;
+}
+
+export async function reactToPost(req: Request, res: Response) {
+  try {
+    const reqAny = req as any;
+    const userId = reqAny.user?.id;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+    const { postId } = req.params as { postId: string };
+    const { key } = (req.body || {}) as { key?: ReactionKey };
+    const validKeys: ReactionKey[] = ["like", "love", "haha", "sad", "angry"];
+    if (!key || !validKeys.includes(key)) {
+      return res.status(400).json({ message: "Invalid reaction key" });
+    }
+
+    // Ensure post exists
+    const post = await PostModel.findById(postId).exec();
+    if (!post) return res.status(404).json({ message: "Post not found" });
+
+    // Find existing reaction
+    const existing = await PostReactionModel.findOne({ post_id: postId, user_id: userId }).exec();
+
+    if (!existing) {
+      // Create new reaction and increment corresponding count
+      await Promise.all([
+        PostReactionModel.create({ post_id: postId, user_id: userId, key }),
+        PostModel.findByIdAndUpdate(
+          postId,
+          { $inc: { [reactionField(key)]: 1 } as any },
+          { new: false }
+        ).exec(),
+      ]);
+    } else if (existing.key !== key) {
+      // Change reaction: decrement old, increment new
+      const oldKey = existing.key as ReactionKey;
+      await Promise.all([
+        PostReactionModel.updateOne(
+          { _id: existing._id },
+          { $set: { key } }
+        ).exec(),
+        PostModel.findByIdAndUpdate(
+          postId,
+          { $inc: { [reactionField(oldKey)]: -1, [reactionField(key)]: 1 } as any },
+          { new: false }
+        ).exec(),
+      ]);
+    } // else same key -> no-op
+
+    // Fetch updated counts for response
+    const updated = await PostModel.findById(postId).lean().exec();
+    return res.status(200).json({
+      postId,
+      interactions: {
+        like: updated?.like_count ?? 0,
+        love: updated?.love_count ?? 0,
+        haha: updated?.haha_count ?? 0,
+        sad: updated?.sad_count ?? 0,
+        angry: updated?.angry_count ?? 0,
+      },
+      viewer: { reaction: key },
+    });
+  } catch (error: any) {
+    console.error("reactToPost error", error);
+    if (error?.code === 11000) {
+      // Unique index race; fall back to idempotent response
+      return res.status(409).json({ message: "Reaction already exists" });
+    }
+    return res.status(500).json({ message: "Failed to react" });
+  }
+}
+
+export async function removeReaction(req: Request, res: Response) {
+  try {
+    const reqAny = req as any;
+    const userId = reqAny.user?.id;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+    const { postId } = req.params as { postId: string };
+
+    const post = await PostModel.findById(postId).exec();
+    if (!post) return res.status(404).json({ message: "Post not found" });
+
+    const existing = await PostReactionModel.findOne({ post_id: postId, user_id: userId }).exec();
+    if (!existing) {
+      // Nothing to remove; return current state
+      const updated = await PostModel.findById(postId).lean().exec();
+      return res.status(200).json({
+        postId,
+        interactions: {
+          like: updated?.like_count ?? 0,
+          love: updated?.love_count ?? 0,
+          haha: updated?.haha_count ?? 0,
+          sad: updated?.sad_count ?? 0,
+          angry: updated?.angry_count ?? 0,
+        },
+        viewer: { reaction: undefined },
+      });
+    }
+
+    const oldKey = existing.key as ReactionKey;
+    await Promise.all([
+      PostReactionModel.deleteOne({ _id: existing._id }).exec(),
+      PostModel.findByIdAndUpdate(
+        postId,
+        { $inc: { [reactionField(oldKey)]: -1 } as any },
+        { new: false }
+      ).exec(),
+    ]);
+
+    const updated = await PostModel.findById(postId).lean().exec();
+    return res.status(200).json({
+      postId,
+      interactions: {
+        like: updated?.like_count ?? 0,
+        love: updated?.love_count ?? 0,
+        haha: updated?.haha_count ?? 0,
+        sad: updated?.sad_count ?? 0,
+        angry: updated?.angry_count ?? 0,
+      },
+      viewer: { reaction: undefined },
+    });
+  } catch (error) {
+    console.error("removeReaction error", error);
+    return res.status(500).json({ message: "Failed to remove reaction" });
   }
 }
