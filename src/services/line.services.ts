@@ -331,6 +331,7 @@ async function me(req, res) {
       username: user.username,
       handle: user.handle,
       picture_url: user.picture_url,
+      exp: payload.exp,
     });
   } catch (err) {
     return res.status(500).json({ error: "Internal Server Error" });
