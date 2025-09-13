@@ -29,4 +29,14 @@ feedRouter.delete("/:postId/save", async (req, res) => {
   await services.removeSave(req, res);
 });
 
+// POST /feed/:postId/comments
+feedRouter.post("/:postId/comments", async (req, res) => {
+  await services.addComment(req, res);
+});
+
+// GET /feed/:postId/comments?limit&cursor
+feedRouter.get("/:postId/comments", async (req, res) => {
+  await services.getCommentsByPostId(req, res);
+});
+
 export default feedRouter;

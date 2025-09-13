@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import type { ReactionKey, Visibility } from "../models/enums";
-import { PostModel, PostReactionModel, PostSaveModel, UserModel } from "../models";
+import { PostModel, PostReactionModel, PostSaveModel, PostCommentModel, UserModel } from "../models";
 
 type UserMeta = {
   handle: string;
@@ -392,5 +392,141 @@ export async function removeSave(req: Request, res: Response) {
   } catch (error) {
     console.error("removeSave error", error);
     return res.status(500).json({ message: "Failed to remove save" });
+  }
+}
+
+export async function addComment(req: Request, res: Response) {
+  try {
+    const reqAny = req as any;
+    const userId = reqAny.user?.id;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+    const { postId } = req.params as { postId: string };
+    const { text, parentCommentId, visibility } = (req.body || {}) as {
+      text?: string;
+      parentCommentId?: string;
+      visibility?: "Public" | "OwnerOnly";
+    };
+
+    if (!text || typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ message: "Text is required" });
+    }
+
+    const post = await PostModel.findById(postId).exec();
+    if (!post) return res.status(404).json({ message: "Post not found" });
+    if (!post.allow_comments) {
+      return res.status(403).json({ message: "Comments are disabled for this post" });
+    }
+
+    let parent = null as any;
+    if (parentCommentId) {
+      parent = await PostCommentModel.findById(parentCommentId).lean().exec();
+      if (!parent) return res.status(404).json({ message: "Parent comment not found" });
+      if (String(parent.post_id) !== String(post._id)) {
+        return res.status(400).json({ message: "Parent comment does not belong to this post" });
+      }
+    }
+
+    const created = await PostCommentModel.create({
+      post_id: post._id,
+      user_id: userId,
+      parent_comment_id: parent ? parent._id : undefined,
+      text: text.trim(),
+      visibility: visibility === "OwnerOnly" ? "OwnerOnly" : "Public",
+    });
+
+    // increment comments_count
+    await PostModel.findByIdAndUpdate(postId, { $inc: { comments_count: 1 } }).exec();
+
+    const user = await UserModel.findById(userId).lean().exec();
+    return res.status(201).json({
+      id: created._id.toString(),
+      postId: postId,
+      text: created.text,
+      visibility: created.visibility,
+      parentCommentId: created.parent_comment_id?.toString() || null,
+      user: {
+        id: user?._id?.toString() || String(userId),
+        handle: user?.handle || "unknown",
+        name: user?.username || "Unknown User",
+        avatar: user?.picture_url || "https://i.pravatar.cc/100?img=1",
+      },
+      createdAt: created.created_at?.toISOString?.() || new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("addComment error", error);
+    return res.status(500).json({ message: "Failed to add comment" });
+  }
+}
+
+export async function getCommentsByPostId(req: Request, res: Response) {
+  try {
+    const { postId } = req.params as { postId: string };
+    const limit = parseLimit(req.query.limit, 10, 1, 50);
+    const cursor = decodeCursor(req.query.cursor as string | undefined);
+
+    // ensure post exists (optional but clearer errors)
+    const post = await PostModel.findById(postId).lean().exec();
+    if (!post) return res.status(404).json({ message: "Post not found" });
+
+    const viewerId = (req as any)?.user?.id?.toString();
+    const isOwner = viewerId && viewerId === post.user_id?.toString();
+
+    const filter: any = {
+      post_id: postId,
+      ...buildCursorFilter(cursor),
+      deleted_at: { $exists: false },
+    };
+    // Only owner can see OwnerOnly comments
+    if (!isOwner) {
+      filter.visibility = "Public";
+    }
+
+    const sort = { created_at: -1 as const, _id: -1 as const };
+    const comments = await PostCommentModel.find(filter)
+      .sort(sort)
+      .limit(limit + 1)
+      .lean()
+      .exec();
+
+    const hasMore = comments.length > limit;
+    const pageItems = hasMore ? comments.slice(0, limit) : comments;
+
+    const userIds = Array.from(new Set(pageItems.map((c) => c.user_id?.toString()).filter(Boolean)));
+    const users = await UserModel.find({ _id: { $in: userIds } }).lean().exec();
+    const userMap = new Map(users.map((u) => [u._id.toString(), u]));
+
+    const items = pageItems.map((c) => {
+      const u = userMap.get(c.user_id?.toString() || "");
+      return {
+        id: c._id.toString(),
+        postId,
+        text: c.text,
+        visibility: c.visibility,
+        parentCommentId: c.parent_comment_id ? c.parent_comment_id.toString() : null,
+        user: {
+          id: c.user_id?.toString() || "",
+          handle: u?.handle || "unknown",
+          name: u?.username || "Unknown User",
+          avatar: u?.picture_url || "https://i.pravatar.cc/100?img=1",
+        },
+        createdAt: c.created_at?.toISOString?.() || new Date().toISOString(),
+      };
+    });
+
+    const nextCursor = hasMore
+      ? encodeCursor({
+          createdAt: pageItems[pageItems.length - 1].created_at.toISOString(),
+          id: pageItems[pageItems.length - 1]._id.toString(),
+        })
+      : null;
+
+    return res.status(200).json({
+      items,
+      paging: { hasMore, nextCursor },
+    });
+  } catch (error) {
+    console.error("getCommentsByPostId error", error);
+    return res.status(500).json({ message: "Failed to get comments" });
   }
 }

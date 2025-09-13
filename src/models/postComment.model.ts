@@ -13,6 +13,8 @@ const postCommentSchema = new Schema(
       default: "Public",
     },
     deleted_at: { type: Date },
+    created_at: { type: Date, default: () => new Date() },
+    updated_at: { type: Date, default: () => new Date() },
   },
   {
     collection: "post_comments",
@@ -20,10 +22,20 @@ const postCommentSchema = new Schema(
   }
 );
 
-postCommentSchema.index({ post_id: 1, created_at: 1 }, { name: "idx_comments_post_created" });
-postCommentSchema.index({ post_id: 1, visibility: 1, created_at: 1 }, { name: "idx_comments_vis_created" });
-postCommentSchema.index({ parent_comment_id: 1 }, { name: "idx_comments_parent" });
+postCommentSchema.index(
+  { post_id: 1, created_at: 1 },
+  { name: "idx_comments_post_created" }
+);
+postCommentSchema.index(
+  { post_id: 1, visibility: 1, created_at: 1 },
+  { name: "idx_comments_vis_created" }
+);
+postCommentSchema.index(
+  { parent_comment_id: 1 },
+  { name: "idx_comments_parent" }
+);
 
-export type PostComment = InferSchemaType<typeof postCommentSchema> & { _id: Schema.Types.ObjectId };
+export type PostComment = InferSchemaType<typeof postCommentSchema> & {
+  _id: Schema.Types.ObjectId;
+};
 export const PostCommentModel = model("PostComment", postCommentSchema);
-
