@@ -472,15 +472,23 @@ export async function getCommentsByPostId(req: Request, res: Response) {
     const viewerId = (req as any)?.user?.id?.toString();
     const isOwner = viewerId && viewerId === post.user_id?.toString();
 
-    const filter: any = {
-      post_id: postId,
-      ...buildCursorFilter(cursor),
-      deleted_at: { $exists: false },
-    };
-    // Only owner can see OwnerOnly comments
+    // Build access conditions
+    const baseConditions: any[] = [
+      { post_id: postId },
+      buildCursorFilter(cursor),
+      { deleted_at: { $exists: false } },
+    ];
+
+    // If viewer is not the post owner, restrict to Public or viewer's own comments
     if (!isOwner) {
-      filter.visibility = "Public";
+      if (viewerId) {
+        baseConditions.push({ $or: [{ visibility: "Public" }, { user_id: viewerId }] });
+      } else {
+        baseConditions.push({ visibility: "Public" });
+      }
     }
+
+    const filter: any = { $and: baseConditions };
 
     const sort = { created_at: -1 as const, _id: -1 as const };
     const comments = await PostCommentModel.find(filter)
