@@ -38,6 +38,11 @@ feedRouter.post("/:postId/comments", async (req, res) => {
   await services.addComment(req, res);
 });
 
+// GET /feed/:postId
+feedRouter.get("/:postId", async (req, res) => {
+  await services.getPostById(req, res);
+});
+
 // GET /feed/:postId/comments?limit&cursor
 feedRouter.get("/:postId/comments", async (req, res) => {
   await services.getCommentsByPostId(req, res);

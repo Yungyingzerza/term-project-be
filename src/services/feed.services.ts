@@ -291,6 +291,79 @@ export async function getFeedByUserHandle(req: Request, res: Response) {
   }
 }
 
+export async function getPostById(req: Request, res: Response) {
+  try {
+    const { postId } = req.params as { postId: string };
+    const viewerId = (req as any)?.user?.id?.toString();
+
+    const post = await PostModel.findById(postId).lean().exec();
+    if (!post) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    const author = await UserModel.findById(post.user_id).lean().exec();
+    if (!author) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    const authorId = post.user_id.toString();
+    const isOwner = viewerId && viewerId === authorId;
+
+    if (!isOwner && post.visibility !== "Public") {
+      return res.status(403).json({ message: "Post is not accessible" });
+    }
+
+    let viewer: ViewerState | undefined;
+    if (viewerId) {
+      const [reaction, save] = await Promise.all([
+        PostReactionModel.findOne({ post_id: postId, user_id: viewerId })
+          .lean()
+          .exec(),
+        PostSaveModel.findOne({ post_id: postId, user_id: viewerId })
+          .lean()
+          .exec(),
+      ]);
+      viewer = {
+        saved: Boolean(save),
+        reaction: reaction?.key as ReactionKey | undefined,
+      };
+    }
+
+    const dto: PostDTO = {
+      id: post._id.toString(),
+      user: {
+        handle: author.handle || "unknown",
+        name: author.username || "Unknown User",
+        avatar: author.picture_url || "https://i.pravatar.cc/100?img=1",
+      },
+      caption: post.caption ?? "",
+      music: post.music ?? "",
+      interactions: {
+        like: post.like_count ?? 0,
+        love: post.love_count ?? 0,
+        haha: post.haha_count ?? 0,
+        sad: post.sad_count ?? 0,
+        angry: post.angry_count ?? 0,
+      },
+      comments: post.comments_count ?? 0,
+      saves: post.saves_count ?? 0,
+      thumbnail: post.thumbnail ?? "",
+      tags: post.tags ?? [],
+      videoSrc: post.video_src ?? "",
+      visibility: post.visibility,
+      allowComments: post.allow_comments,
+      createdAt: post.created_at?.toISOString() ?? new Date().toISOString(),
+      updatedAt: post.updated_at?.toISOString() ?? new Date().toISOString(),
+      viewer: viewer ?? { saved: false, reaction: undefined },
+    };
+
+    return res.status(200).json({ item: dto });
+  } catch (error) {
+    console.error("getPostById error", error);
+    return res.status(500).json({ message: "Failed to get post" });
+  }
+}
+
 function reactionField(key: ReactionKey) {
   return `${key}_count` as const;
 }
