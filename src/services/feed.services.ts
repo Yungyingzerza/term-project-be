@@ -1,6 +1,12 @@
 import { Request, Response } from "express";
 import type { ReactionKey, Visibility } from "../models/enums";
-import { PostModel, PostReactionModel, PostSaveModel, PostCommentModel, UserModel } from "../models";
+import {
+  PostModel,
+  PostReactionModel,
+  PostSaveModel,
+  PostCommentModel,
+  UserModel,
+} from "../models";
 
 type UserMeta = {
   handle: string;
@@ -122,7 +128,9 @@ export async function getFeed(req: Request, res: Response) {
           .lean()
           .exec(),
       ]);
-      reactionMap = new Map(reactions.map((r: any) => [r.post_id.toString(), r.key as ReactionKey]));
+      reactionMap = new Map(
+        reactions.map((r: any) => [r.post_id.toString(), r.key as ReactionKey])
+      );
       savedSet = new Set(saves.map((s: any) => s.post_id.toString()));
     }
 
@@ -179,6 +187,107 @@ export async function getFeed(req: Request, res: Response) {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ message: "Something went wrong!" });
+  }
+}
+
+// GET /feed/user/handle/:handle?limit&cursor
+export async function getFeedByUserHandle(req: Request, res: Response) {
+  try {
+    const { handle } = req.params as { handle: string };
+    const limit = parseLimit(req.query.limit);
+    const cursor = decodeCursor(req.query.cursor as string | undefined);
+
+    // Resolve handle to user
+    const author = await UserModel.findOne({ handle }).lean().exec();
+    if (!author) return res.status(404).json({ message: "User not found" });
+
+    const authorId = author._id.toString();
+    const viewerId = (req as any)?.user?.id?.toString();
+    const isOwner = viewerId && viewerId === authorId;
+
+    const baseFilter: any = { user_id: author._id };
+    if (!isOwner) {
+      baseFilter.visibility = "Public" as Visibility;
+    }
+
+    const rangeFilter = buildCursorFilter(cursor);
+    const filter = { ...baseFilter, ...rangeFilter };
+    const sort = { created_at: -1 as const, _id: -1 as const };
+
+    const posts = await PostModel.find(filter)
+      .sort(sort)
+      .limit(limit + 1)
+      .exec();
+
+    const hasMore = posts.length > limit;
+    const pageItems = hasMore ? posts.slice(0, limit) : posts;
+
+    // Viewer state
+    const postIds = pageItems.map((p) => p._id.toString());
+    let reactionMap = new Map<string, ReactionKey>();
+    let savedSet = new Set<string>();
+    if (viewerId && postIds.length > 0) {
+      const [reactions, saves] = await Promise.all([
+        PostReactionModel.find({ post_id: { $in: postIds }, user_id: viewerId })
+          .lean()
+          .exec(),
+        PostSaveModel.find({ post_id: { $in: postIds }, user_id: viewerId })
+          .lean()
+          .exec(),
+      ]);
+      reactionMap = new Map(
+        reactions.map((r: any) => [r.post_id.toString(), r.key as ReactionKey])
+      );
+      savedSet = new Set(saves.map((s: any) => s.post_id.toString()));
+    }
+
+    const items = pageItems.map((post) => {
+      const id = post._id.toString();
+      return {
+        id,
+        user: {
+          handle: author.handle || "unknown",
+          name: author.username || "Unknown User",
+          avatar: author.picture_url || "https://i.pravatar.cc/100?img=1",
+        },
+        caption: post.caption ?? "",
+        music: post.music ?? "",
+        interactions: {
+          like: post.like_count ?? 0,
+          love: post.love_count ?? 0,
+          haha: post.haha_count ?? 0,
+          sad: post.sad_count ?? 0,
+          angry: post.angry_count ?? 0,
+        },
+        comments: post.comments_count ?? 0,
+        saves: post.saves_count ?? 0,
+        thumbnail: post.thumbnail ?? "",
+        tags: post.tags ?? [],
+        videoSrc: post.video_src ?? "",
+        visibility: post.visibility,
+        allowComments: post.allow_comments,
+        createdAt: post.created_at?.toISOString() ?? new Date().toISOString(),
+        updatedAt: post.updated_at?.toISOString() ?? new Date().toISOString(),
+        viewer: {
+          saved: savedSet.has(id),
+          reaction: reactionMap.get(id),
+        },
+      } as PostDTO;
+    });
+
+    const nextCursor = hasMore
+      ? encodeCursor({
+          createdAt: pageItems[pageItems.length - 1].created_at.toISOString(),
+          id: pageItems[pageItems.length - 1]._id.toString(),
+        })
+      : null;
+
+    return res.status(200).json({ items, paging: { hasMore, nextCursor } });
+  } catch (error) {
+    console.error("getFeedByUserHandle error", error);
+    return res
+      .status(500)
+      .json({ message: "Failed to get user feed by handle" });
   }
 }
 
@@ -371,7 +480,10 @@ export async function removeSave(req: Request, res: Response) {
     const post = await PostModel.findById(postId).exec();
     if (!post) return res.status(404).json({ message: "Post not found" });
 
-    const existing = await PostSaveModel.findOne({ post_id: postId, user_id: userId }).exec();
+    const existing = await PostSaveModel.findOne({
+      post_id: postId,
+      user_id: userId,
+    }).exec();
     if (existing) {
       await Promise.all([
         PostSaveModel.deleteOne({ _id: existing._id }).exec(),
@@ -415,15 +527,20 @@ export async function addComment(req: Request, res: Response) {
     const post = await PostModel.findById(postId).exec();
     if (!post) return res.status(404).json({ message: "Post not found" });
     if (!post.allow_comments) {
-      return res.status(403).json({ message: "Comments are disabled for this post" });
+      return res
+        .status(403)
+        .json({ message: "Comments are disabled for this post" });
     }
 
     let parent = null as any;
     if (parentCommentId) {
       parent = await PostCommentModel.findById(parentCommentId).lean().exec();
-      if (!parent) return res.status(404).json({ message: "Parent comment not found" });
+      if (!parent)
+        return res.status(404).json({ message: "Parent comment not found" });
       if (String(parent.post_id) !== String(post._id)) {
-        return res.status(400).json({ message: "Parent comment does not belong to this post" });
+        return res
+          .status(400)
+          .json({ message: "Parent comment does not belong to this post" });
       }
     }
 
@@ -436,7 +553,9 @@ export async function addComment(req: Request, res: Response) {
     });
 
     // increment comments_count
-    await PostModel.findByIdAndUpdate(postId, { $inc: { comments_count: 1 } }).exec();
+    await PostModel.findByIdAndUpdate(postId, {
+      $inc: { comments_count: 1 },
+    }).exec();
 
     const user = await UserModel.findById(userId).lean().exec();
     return res.status(201).json({
@@ -451,7 +570,8 @@ export async function addComment(req: Request, res: Response) {
         name: user?.username || "Unknown User",
         avatar: user?.picture_url || "https://i.pravatar.cc/100?img=1",
       },
-      createdAt: created.created_at?.toISOString?.() || new Date().toISOString(),
+      createdAt:
+        created.created_at?.toISOString?.() || new Date().toISOString(),
     });
   } catch (error) {
     console.error("addComment error", error);
@@ -482,7 +602,9 @@ export async function getCommentsByPostId(req: Request, res: Response) {
     // If viewer is not the post owner, restrict to Public or viewer's own comments
     if (!isOwner) {
       if (viewerId) {
-        baseConditions.push({ $or: [{ visibility: "Public" }, { user_id: viewerId }] });
+        baseConditions.push({
+          $or: [{ visibility: "Public" }, { user_id: viewerId }],
+        });
       } else {
         baseConditions.push({ visibility: "Public" });
       }
@@ -500,8 +622,12 @@ export async function getCommentsByPostId(req: Request, res: Response) {
     const hasMore = comments.length > limit;
     const pageItems = hasMore ? comments.slice(0, limit) : comments;
 
-    const userIds = Array.from(new Set(pageItems.map((c) => c.user_id?.toString()).filter(Boolean)));
-    const users = await UserModel.find({ _id: { $in: userIds } }).lean().exec();
+    const userIds = Array.from(
+      new Set(pageItems.map((c) => c.user_id?.toString()).filter(Boolean))
+    );
+    const users = await UserModel.find({ _id: { $in: userIds } })
+      .lean()
+      .exec();
     const userMap = new Map(users.map((u) => [u._id.toString(), u]));
 
     const items = pageItems.map((c) => {
@@ -511,7 +637,9 @@ export async function getCommentsByPostId(req: Request, res: Response) {
         postId,
         text: c.text,
         visibility: c.visibility,
-        parentCommentId: c.parent_comment_id ? c.parent_comment_id.toString() : null,
+        parentCommentId: c.parent_comment_id
+          ? c.parent_comment_id.toString()
+          : null,
         user: {
           id: c.user_id?.toString() || "",
           handle: u?.handle || "unknown",

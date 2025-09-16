@@ -8,6 +8,10 @@ feedRouter.use(getUserIdFromToken);
 feedRouter.get("/", async (req, res) => {
   await services.getFeed(req, res);
 });
+// GET /feed/user/handle/:handle?limit&cursor
+feedRouter.get("/user/handle/:handle", async (req, res) => {
+  await services.getFeedByUserHandle(req, res);
+});
 
 // PUT /feed/:postId/reaction { key: ReactionKey }
 feedRouter.put("/:postId/reaction", async (req, res) => {
