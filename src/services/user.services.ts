@@ -1,6 +1,30 @@
 import { Request, Response } from "express";
-import { OrganizationMembershipModel, OrganizationModel, UserEmailModel } from "../models";
+import { OrganizationMembershipModel, OrganizationModel, UserEmailModel, UserModel, FollowModel, PostModel } from "../models";
 
+// Get user profile by user ID
+async function getUserProfile(req: Request, res: Response) {
+    try {
+        const { userId } = req.params;
+        if (!userId) return res.status(400).json({ message: "User ID is required" });
+
+        const user = await UserModel.findById(userId).select("-password");
+        if (!user) return res.status(404).json({ message: "User not found" });
+
+        // Get follower and following counts
+        const followerCount = await FollowModel.countDocuments({ followee_id: userId });
+        const followingCount = await FollowModel.countDocuments({ follower_id: userId });
+
+        // Count posts
+        const postCount = await PostModel.countDocuments({ user_id: userId });
+
+        return res.status(200).json({ user, follower_count: followerCount, following_count: followingCount, post_count: postCount });
+    } catch (error) {
+        console.error("Error in getUserProfile:", error);
+        return res.status(500).json({ message: "Something went wrong!" });
+    }
+}
+
+// Create a new email for the user
 async function createEmail(req: Request, res: Response) {
     try {
         const reqAny = req as any;
@@ -43,6 +67,7 @@ async function createEmail(req: Request, res: Response) {
     }
 }
 
+// Get all emails for the user
 async function getEmails(req: Request, res: Response) {
     try {
         const reqAny = req as any;
@@ -56,6 +81,7 @@ async function getEmails(req: Request, res: Response) {
     }
 }
 
+// Delete an email for the user
 async function deleteEmail(req: Request, res: Response) {
     try {
         const reqAny = req as any;
@@ -90,4 +116,4 @@ async function deleteEmail(req: Request, res: Response) {
     }
 }
 
-export { createEmail, getEmails, deleteEmail };
+export { createEmail, getEmails, deleteEmail, getUserProfile };

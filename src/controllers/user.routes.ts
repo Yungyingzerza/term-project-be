@@ -5,6 +5,10 @@ import getUserIdFromToken from "../middlewares/getUserIdFromToken";
 const userRouter = express.Router();
 userRouter.use(getUserIdFromToken);
 
+userRouter.get("/profile/:userId", async (req, res) => {
+    await services.getUserProfile(req, res);
+});
+
 userRouter.post("/email", async (req, res) => {
     await services.createEmail(req, res);
 });
