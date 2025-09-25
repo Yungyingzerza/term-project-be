@@ -121,8 +121,117 @@ async function followUser(req: Request, res: Response) {
     }
 }
 
-// Show user's 
+// Get user's saved videos
+async function getSavedVideos(req: Request, res: Response) {
+    try {
+        const reqAny = req as any;
+        const viewerIdRaw = reqAny.user?.id;
+        const viewerId = typeof viewerIdRaw === "string" ? viewerIdRaw : viewerIdRaw?.toString?.();
+        if (!viewerId) return res.status(401).json({ message: "Unauthorized" });
 
+        const limit = parseLimit(req.query.limit, 10, 1, 50);
+        const cursor = decodeCursor(req.query.cursor as string | undefined);
+
+        const cursorFilter = buildReactionCursorFilter(cursor);
+        const saveFilter = { user_id: viewerId, ...cursorFilter } as Record<string, unknown>;
+
+        const saves = await PostSaveModel.find(saveFilter)
+            .sort({ created_at: -1, _id: -1 })
+            .limit(limit + 1)
+            .lean()
+            .exec();
+
+        const hasMore = saves.length > limit;
+        const pageSaves = hasMore ? saves.slice(0, limit) : saves;
+
+        const postIds = Array.from(new Set(pageSaves.map((save: any) => String(save.post_id))));
+        const posts = await PostModel.find({ _id: { $in: postIds } }).lean().exec();
+        const postMap = new Map(posts.map((post: any) => [post._id.toString(), post]));
+
+        const authorIds = Array.from(new Set(posts.map((post: any) => String(post.user_id))));
+        const authors = await UserModel.find({ _id: { $in: authorIds } }).lean().exec();
+        const authorMap = new Map(authors.map((author: any) => [author._id.toString(), author]));
+
+        let reactionMap = new Map<string, string>();
+        if (postIds.length > 0) {
+            const reactions = await PostReactionModel.find({ post_id: { $in: postIds }, user_id: viewerId }).lean().exec();
+            reactionMap = new Map(reactions.map((reaction: any) => [String(reaction.post_id), reaction.key]));
+        }
+
+        const items = pageSaves
+            .map((save: any) => {
+                const post = postMap.get(String(save.post_id));
+                if (!post) return null;
+                const author = authorMap.get(String(post.user_id));
+                const postId = post._id.toString();
+                return {
+                    postId,
+                    savedAt: save.created_at instanceof Date
+                        ? save.created_at.toISOString()
+                        : new Date(save.created_at ?? Date.now()).toISOString(),
+                    post: {
+                        id: postId,
+                        user: {
+                            id: String(post.user_id),
+                            handle: author?.handle || "unknown",
+                            name: author?.username || "Unknown User",
+                            avatar: author?.picture_url || "https://i.pravatar.cc/100?img=1",
+                        },
+                        caption: post.caption ?? "",
+                        music: post.music ?? "",
+                        interactions: {
+                            like: post.like_count ?? 0,
+                            love: post.love_count ?? 0,
+                            haha: post.haha_count ?? 0,
+                            sad: post.sad_count ?? 0,
+                            angry: post.angry_count ?? 0,
+                        },
+                        comments: post.comments_count ?? 0,
+                        saves: post.saves_count ?? 0,
+                        thumbnail: post.thumbnail ?? "",
+                        tags: Array.isArray(post.tags) ? post.tags : [],
+                        videoSrc: post.video_src ?? "",
+                        visibility: post.visibility,
+                        allowComments: post.allow_comments,
+                        createdAt: post.created_at instanceof Date
+                            ? post.created_at.toISOString()
+                            : new Date(post.created_at ?? Date.now()).toISOString(),
+                        updatedAt: post.updated_at instanceof Date
+                            ? post.updated_at.toISOString()
+                            : new Date(post.updated_at ?? Date.now()).toISOString(),
+                        viewer: {
+                            reaction: reactionMap.get(postId) || null,
+                            saved: true,
+                        },
+                    },
+                };
+            })
+            .filter(Boolean);
+
+        const lastSave = pageSaves[pageSaves.length - 1];
+        const nextCursor = hasMore && lastSave?.created_at
+            ? encodeCursor({
+                createdAt: lastSave.created_at instanceof Date
+                    ? lastSave.created_at.toISOString()
+                    : new Date(lastSave.created_at).toISOString(),
+                id: lastSave._id.toString(),
+            })
+            : null;
+
+        return res.status(200).json({
+            items,
+            paging: {
+                hasMore,
+                nextCursor,
+            },
+        });
+    } catch (error) {
+        console.error("Error in getSavedVideos:", error);
+        return res.status(500).json({ message: "Something went wrong!" });
+    }
+}
+
+// Get user's reacted videos
 async function getReactedVideos(req: Request, res: Response) {
     try {
         const reqAny = req as any;
@@ -328,5 +437,5 @@ async function deleteEmail(req: Request, res: Response) {
     }
 }
 
-export { createEmail, deleteEmail, followUser, getEmails, getReactedVideos, getUserProfile };
+export { createEmail, deleteEmail, followUser, getEmails, getReactedVideos, getUserProfile, getSavedVideos };
 

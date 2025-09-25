@@ -29,4 +29,8 @@ userRouter.get("/reactions/videos", async (req, res) => {
     await services.getReactedVideos(req, res);
 });
 
+userRouter.get("/saves/videos", async (req, res) => {
+    await services.getSavedVideos(req, res);
+});
+
 export default userRouter;
