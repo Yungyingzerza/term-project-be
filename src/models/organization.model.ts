@@ -3,7 +3,7 @@ import { Schema, model, InferSchemaType } from "mongoose";
 const organizationSchema = new Schema(
   {
     name: { type: String, required: true, unique: true },
-    logo_url: { type: String },
+    logo_url: { type: String, default: "https://api.yungying.com/isne11/uploads/1704899659167image.png" },
     domains: { type: [Schema.Types.Mixed], default: undefined },
   },
   {

@@ -4,6 +4,8 @@ const postSaveSchema = new Schema(
   {
     post_id: { type: Schema.Types.ObjectId, ref: "Post", required: true },
     user_id: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    created_at: { type: Date, default: () => new Date() },
+    updated_at: { type: Date, default: () => new Date() },
   },
   {
     collection: "post_saves",
