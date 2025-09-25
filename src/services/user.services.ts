@@ -1,5 +1,61 @@
 import { Request, Response } from "express";
-import { OrganizationMembershipModel, OrganizationModel, UserEmailModel, UserModel, FollowModel, PostModel } from "../models";
+import { Types } from "mongoose";
+import { FollowModel, OrganizationMembershipModel, OrganizationModel, PostModel, PostReactionModel, PostSaveModel, UserEmailModel, UserModel } from "../models";
+
+type ReactionCursorToken = { createdAt: string; id: string };
+
+function parseLimit(raw: unknown, def = 10, min = 1, max = 50) {
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+        const clamped = Math.min(Math.max(raw, min), max);
+        return clamped;
+    }
+
+    if (typeof raw === "string") {
+        const parsed = Number.parseInt(raw, 10);
+        if (!Number.isNaN(parsed)) {
+            const clamped = Math.min(Math.max(parsed, min), max);
+            return clamped;
+        }
+    }
+
+    return def;
+}
+
+function encodeCursor(cursor: ReactionCursorToken): string {
+    return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64");
+}
+
+function decodeCursor(raw?: string | null): ReactionCursorToken | null {
+    if (!raw) return null;
+    try {
+        const parsed = JSON.parse(Buffer.from(raw, "base64").toString("utf8"));
+        if (typeof parsed?.createdAt === "string" && typeof parsed?.id === "string") {
+            return parsed as ReactionCursorToken;
+        }
+    } catch {
+        // ignore malformed cursor
+    }
+    return null;
+}
+
+function buildReactionCursorFilter(cursor: ReactionCursorToken | null) {
+    if (!cursor) return {};
+
+    const createdAt = new Date(cursor.createdAt);
+    if (Number.isNaN(createdAt.getTime())) return {};
+
+    if (!Types.ObjectId.isValid(cursor.id)) {
+        return { created_at: { $lt: createdAt } };
+    }
+
+    const reactionId = new Types.ObjectId(cursor.id);
+    return {
+        $or: [
+            { created_at: { $lt: createdAt } },
+            { created_at: createdAt, _id: { $lt: reactionId } },
+        ],
+    };
+}
 
 // Get user profile by user ID
 async function getUserProfile(req: Request, res: Response) {
@@ -61,6 +117,121 @@ async function followUser(req: Request, res: Response) {
         }
     } catch (error) {
         console.error("Error in followUser:", error);
+        return res.status(500).json({ message: "Something went wrong!" });
+    }
+}
+
+// Show user's 
+
+async function getReactedVideos(req: Request, res: Response) {
+    try {
+        const reqAny = req as any;
+        const viewerIdRaw = reqAny.user?.id;
+        const viewerId = typeof viewerIdRaw === "string" ? viewerIdRaw : viewerIdRaw?.toString?.();
+        if (!viewerId) return res.status(401).json({ message: "Unauthorized" });
+
+        const limit = parseLimit(req.query.limit, 10, 1, 50);
+        const cursor = decodeCursor(req.query.cursor as string | undefined);
+
+        const cursorFilter = buildReactionCursorFilter(cursor);
+        const reactionFilter = { user_id: viewerId, ...cursorFilter } as Record<string, unknown>;
+
+        const reactions = await PostReactionModel.find(reactionFilter)
+            .sort({ created_at: -1, _id: -1 })
+            .limit(limit + 1)
+            .lean()
+            .exec();
+
+        const hasMore = reactions.length > limit;
+        const pageReactions = hasMore ? reactions.slice(0, limit) : reactions;
+
+        const postIds = Array.from(new Set(pageReactions.map((reaction: any) => String(reaction.post_id))));
+        const posts = await PostModel.find({ _id: { $in: postIds } }).lean().exec();
+        const postMap = new Map(posts.map((post: any) => [post._id.toString(), post]));
+
+        const authorIds = Array.from(new Set(posts.map((post: any) => String(post.user_id))));
+        const authors = await UserModel.find({ _id: { $in: authorIds } }).lean().exec();
+        const authorMap = new Map(authors.map((author: any) => [author._id.toString(), author]));
+
+        let savedSet = new Set<string>();
+        if (postIds.length > 0) {
+            const saves = await PostSaveModel.find({ post_id: { $in: postIds }, user_id: viewerId }).lean().exec();
+            savedSet = new Set(saves.map((save: any) => String(save.post_id)));
+        }
+
+        const items = pageReactions
+            .map((reaction: any) => {
+                const post = postMap.get(String(reaction.post_id));
+                if (!post) return null;
+
+                const author = authorMap.get(String(post.user_id));
+                const postId = post._id.toString();
+
+                return {
+                    postId,
+                    reactionId: reaction._id.toString(),
+                    reactionKey: reaction.key,
+                    reactedAt: reaction.created_at instanceof Date
+                        ? reaction.created_at.toISOString()
+                        : new Date(reaction.created_at ?? Date.now()).toISOString(),
+                    post: {
+                        id: postId,
+                        user: {
+                            id: String(post.user_id),
+                            handle: author?.handle || "unknown",
+                            name: author?.username || "Unknown User",
+                            avatar: author?.picture_url || "https://i.pravatar.cc/100?img=1",
+                        },
+                        caption: post.caption ?? "",
+                        music: post.music ?? "",
+                        interactions: {
+                            like: post.like_count ?? 0,
+                            love: post.love_count ?? 0,
+                            haha: post.haha_count ?? 0,
+                            sad: post.sad_count ?? 0,
+                            angry: post.angry_count ?? 0,
+                        },
+                        comments: post.comments_count ?? 0,
+                        saves: post.saves_count ?? 0,
+                        thumbnail: post.thumbnail ?? "",
+                        tags: Array.isArray(post.tags) ? post.tags : [],
+                        videoSrc: post.video_src ?? "",
+                        visibility: post.visibility,
+                        allowComments: post.allow_comments,
+                        createdAt: post.created_at instanceof Date
+                            ? post.created_at.toISOString()
+                            : new Date(post.created_at ?? Date.now()).toISOString(),
+                        updatedAt: post.updated_at instanceof Date
+                            ? post.updated_at.toISOString()
+                            : new Date(post.updated_at ?? Date.now()).toISOString(),
+                        viewer: {
+                            reaction: reaction.key,
+                            saved: savedSet.has(postId),
+                        },
+                    },
+                };
+            })
+            .filter(Boolean);
+
+        const lastReaction = pageReactions[pageReactions.length - 1];
+        const nextCursor = hasMore && lastReaction?.created_at
+            ? encodeCursor({
+                createdAt: lastReaction.created_at instanceof Date
+                    ? lastReaction.created_at.toISOString()
+                    : new Date(lastReaction.created_at).toISOString(),
+                id: lastReaction._id.toString(),
+            })
+            : null;
+
+        return res.status(200).json({
+            items,
+            paging: {
+                hasMore,
+                nextCursor,
+            },
+        });
+    } catch (error) {
+        console.error("Error in getReactedVideos:", error);
         return res.status(500).json({ message: "Something went wrong!" });
     }
 }
@@ -157,4 +328,5 @@ async function deleteEmail(req: Request, res: Response) {
     }
 }
 
-export { createEmail, getEmails, deleteEmail, getUserProfile, followUser };
+export { createEmail, deleteEmail, followUser, getEmails, getReactedVideos, getUserProfile };
+
