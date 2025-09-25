@@ -17,9 +17,50 @@ async function getUserProfile(req: Request, res: Response) {
         // Count posts
         const postCount = await PostModel.countDocuments({ user_id: userId });
 
-        return res.status(200).json({ user, follower_count: followerCount, following_count: followingCount, post_count: postCount });
+        // Check if viewer is following this user
+        const reqAny = req as any;
+        let isFollowing = null;
+        if (reqAny.user?.id && reqAny.user.id != userId) {
+            const existingFollow = await FollowModel.findOne({ follower_id: reqAny.user.id, followee_id: userId });
+            isFollowing = !!existingFollow;
+        }
+
+        return res.status(200).json({ user, follower_count: followerCount, following_count: followingCount, post_count: postCount, is_following: isFollowing });
     } catch (error) {
         console.error("Error in getUserProfile:", error);
+        return res.status(500).json({ message: "Something went wrong!" });
+    }
+}
+
+// Handle following and unfollowing users
+async function followUser(req: Request, res: Response) {
+    try {
+        const reqAny = req as any;
+        if (!reqAny.user?.id) return res.status(401).json({ message: "Unauthorized" });
+
+        const { targetUserId, action } = req.body;
+        if (!targetUserId || !action) return res.status(400).json({ message: "Target user ID and action are required" });
+        if (action !== "follow" && action !== "unfollow") return res.status(400).json({ message: "Invalid action" });
+        if (targetUserId === reqAny.user.id) return res.status(400).json({ message: "Cannot follow/unfollow yourself" });
+
+        const targetUser = await UserModel.findById(targetUserId);
+        if (!targetUser) return res.status(404).json({ message: "Target user not found" });
+
+        if (action === "follow") {
+            const existingFollow = await FollowModel.findOne({ follower_id: reqAny.user.id, followee_id: targetUserId });
+            if (existingFollow) return res.status(409).json({ message: "Already following this user" });
+
+            await FollowModel.create({ follower_id: reqAny.user.id, followee_id: targetUserId });
+            return res.status(200).json({ message: "Successfully followed the user" });
+        } else {
+            const existingFollow = await FollowModel.findOne({ follower_id: reqAny.user.id, followee_id: targetUserId });
+            if (!existingFollow) return res.status(404).json({ message: "Not following this user" });
+
+            await existingFollow.deleteOne();
+            return res.status(200).json({ message: "Successfully unfollowed the user" });
+        }
+    } catch (error) {
+        console.error("Error in followUser:", error);
         return res.status(500).json({ message: "Something went wrong!" });
     }
 }
@@ -116,4 +157,4 @@ async function deleteEmail(req: Request, res: Response) {
     }
 }
 
-export { createEmail, getEmails, deleteEmail, getUserProfile };
+export { createEmail, getEmails, deleteEmail, getUserProfile, followUser };

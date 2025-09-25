@@ -9,6 +9,10 @@ userRouter.get("/profile/:userId", async (req, res) => {
     await services.getUserProfile(req, res);
 });
 
+userRouter.post("/follow", async (req, res) => {
+    await services.followUser(req, res);
+});
+
 userRouter.post("/email", async (req, res) => {
     await services.createEmail(req, res);
 });
