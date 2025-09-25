@@ -88,6 +88,22 @@ async function getUserProfile(req: Request, res: Response) {
     }
 }
 
+// Get user's organizations
+async function getUserOrganizations(req: Request, res: Response) {
+    try {
+        const reqAny = req as any;
+        if (!reqAny.user?.id) return res.status(401).json({ message: "Unauthorized" });
+
+        const memberships = await OrganizationMembershipModel.find({ user_id: reqAny.user.id }).populate("org_id").exec();
+        const organizations = memberships.map(m => m.org_id);
+
+        return res.status(200).json({ organizations });
+    } catch (error) {
+        console.error("Error in getUserOrganizations:", error);
+        return res.status(500).json({ message: "Something went wrong!" });
+    }
+}
+
 // Handle following and unfollowing users
 async function followUser(req: Request, res: Response) {
     try {
@@ -437,5 +453,5 @@ async function deleteEmail(req: Request, res: Response) {
     }
 }
 
-export { createEmail, deleteEmail, followUser, getEmails, getReactedVideos, getUserProfile, getSavedVideos };
+export { createEmail, deleteEmail, followUser, getEmails, getReactedVideos, getUserProfile, getSavedVideos, getUserOrganizations };
 

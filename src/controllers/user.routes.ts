@@ -33,4 +33,8 @@ userRouter.get("/saves/videos", async (req, res) => {
     await services.getSavedVideos(req, res);
 });
 
+userRouter.get("/organizations", async (req, res) => {
+    await services.getUserOrganizations(req, res);
+});
+
 export default userRouter;
