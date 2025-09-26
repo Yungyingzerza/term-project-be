@@ -155,6 +155,127 @@ async function getUserOrganizations(req: Request, res: Response) {
   }
 }
 
+async function updateHandle(req: Request, res: Response) {
+  try {
+    const reqAny = req as any;
+    if (!reqAny.user?.id)
+      return res.status(401).json({ message: "Unauthorized" });
+
+    const rawHandle =
+      typeof req.body?.handle === "string" ? req.body.handle.trim() : "";
+    const sanitized = rawHandle.startsWith("@")
+      ? rawHandle.slice(1)
+      : rawHandle;
+    const normalizedHandle = sanitized.toLowerCase();
+
+    if (!normalizedHandle) {
+      return res.status(400).json({ message: "Handle is required" });
+    }
+
+    const handlePattern = /^[a-z0-9._-]{3,30}$/;
+    if (!handlePattern.test(normalizedHandle)) {
+      return res.status(400).json({
+        message:
+          "Handle must be 3-30 characters using letters, numbers, '.', '_' or '-'",
+      });
+    }
+
+    const existing = await UserModel.exists({
+      handle: normalizedHandle,
+      _id: { $ne: reqAny.user.id },
+    });
+    if (existing) {
+      return res.status(409).json({ message: "Handle already taken" });
+    }
+
+    const updatedUser = await UserModel.findByIdAndUpdate(
+      reqAny.user.id,
+      { handle: normalizedHandle },
+      { new: true, runValidators: true }
+    ).select("_id username handle picture_url");
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res
+      .status(200)
+      .json({ message: "Handle updated successfully", user: updatedUser });
+  } catch (error) {
+    console.error("Error in updateHandle:", error);
+    return res.status(500).json({ message: "Something went wrong!" });
+  }
+}
+
+async function updateUsername(req: Request, res: Response) {
+  try {
+    const reqAny = req as any;
+    if (!reqAny.user?.id)
+      return res.status(401).json({ message: "Unauthorized" });
+
+    const username =
+      typeof req.body?.username === "string" ? req.body.username.trim() : "";
+    if (!username) {
+      return res.status(400).json({ message: "Username is required" });
+    }
+
+    const updatedUser = await UserModel.findByIdAndUpdate(
+      reqAny.user.id,
+      { username },
+      { new: true, runValidators: true }
+    ).select("_id username handle picture_url");
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res
+      .status(200)
+      .json({ message: "Username updated successfully", user: updatedUser });
+  } catch (error) {
+    console.error("Error in updateUsername:", error);
+    return res.status(500).json({ message: "Something went wrong!" });
+  }
+}
+
+async function updateProfilePicture(req: Request, res: Response) {
+  try {
+    const reqAny = req as any;
+    if (!reqAny.user?.id)
+      return res.status(401).json({ message: "Unauthorized" });
+
+    const rawUrl =
+      typeof req.body?.pictureUrl === "string"
+        ? req.body.pictureUrl
+        : typeof req.body?.picture_url === "string"
+        ? req.body.picture_url
+        : "";
+
+    const pictureUrl = rawUrl.trim();
+    if (!pictureUrl) {
+      return res.status(400).json({ message: "pictureUrl is required" });
+    }
+
+    const updatedUser = await UserModel.findByIdAndUpdate(
+      reqAny.user.id,
+      { picture_url: pictureUrl },
+      { new: true, runValidators: true }
+    ).select("_id username handle picture_url");
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json({
+      message: "Profile picture updated successfully",
+      user: updatedUser,
+    });
+  } catch (error) {
+    console.error("Error in updateProfilePicture:", error);
+    return res.status(500).json({ message: "Something went wrong!" });
+  }
+}
+
 // Handle following and unfollowing users
 async function followUser(req: Request, res: Response) {
   try {
@@ -700,4 +821,7 @@ export {
   getUserOrganizations,
   sendEmailOtp,
   getUserIdByHandle,
+  updateHandle,
+  updateUsername,
+  updateProfilePicture,
 };

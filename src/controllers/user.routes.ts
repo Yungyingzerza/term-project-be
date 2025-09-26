@@ -14,11 +14,23 @@ userRouter.get("/handle/:handle", async (req, res) => {
 });
 
 userRouter.post("/follow", async (req, res) => {
-  await services.followUser(req, res);
+    await services.followUser(req, res);
+});
+
+userRouter.patch("/profile/handle", async (req, res) => {
+    await services.updateHandle(req, res);
+});
+
+userRouter.patch("/profile/username", async (req, res) => {
+    await services.updateUsername(req, res);
+});
+
+userRouter.patch("/profile/picture", async (req, res) => {
+    await services.updateProfilePicture(req, res);
 });
 
 userRouter.post("/email/send-otp", async (req, res) => {
-  await services.sendEmailOtp(req, res);
+    await services.sendEmailOtp(req, res);
 });
 
 userRouter.post("/email", async (req, res) => {
