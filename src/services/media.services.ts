@@ -1,13 +1,78 @@
 import { Request, Response } from "express";
+import { Types } from "mongoose";
 import { minioClient } from "../lib/minio";
-import { PostModel } from "../models";
+import { OrganizationMembershipModel, PostModel, PostOrgModel } from "../models";
 import fs from "fs";
 import path from "path";
-import { promisify } from "util";
 import { spawn } from "child_process";
-
-const unlinkAsync = promisify(fs.unlink);
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+type VisibilityOption = "Public" | "Friends" | "Private" | "Organizations";
+
+const VISIBILITY_OPTIONS: VisibilityOption[] = [
+  "Public",
+  "Friends",
+  "Private",
+  "Organizations",
+];
+
+function normalizeVisibility(raw: unknown): VisibilityOption {
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed) {
+      const canonical =
+        trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+      if ((VISIBILITY_OPTIONS as string[]).includes(canonical)) {
+        return canonical as VisibilityOption;
+      }
+    }
+  }
+  return "Public";
+}
+
+function extractHashtags(source: unknown): string[] {
+  if (typeof source !== "string") return [];
+  const matches = source.match(/#([\p{L}0-9_]+)/gu) ?? [];
+  const unique = new Set(
+    matches
+      .map((tag) => tag.slice(1).trim())
+      .filter(Boolean)
+      .map((tag) => tag.toLowerCase())
+  );
+  return Array.from(unique);
+}
+
+function coerceStringArray(value: unknown): string[] {
+  if (value == null) return [];
+  if (Array.isArray(value)) {
+    const acc: string[] = [];
+    for (const item of value) {
+      acc.push(...coerceStringArray(item));
+    }
+    return acc;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    if ((trimmed.startsWith("[") && trimmed.endsWith("]")) ||
+        (trimmed.startsWith("\"") && trimmed.endsWith("\""))) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return coerceStringArray(parsed);
+      } catch {
+        // fall through to other parsing strategies
+      }
+    }
+    if (trimmed.includes(",")) {
+      return trimmed
+        .split(",")
+        .map((part) => part.trim())
+        .filter(Boolean);
+    }
+    return [trimmed];
+  }
+  return [];
+}
 
 async function safeUnlink(p?: string, label?: string) {
   if (!p) return;
@@ -311,18 +376,85 @@ export async function uploadVideo(req: Request, res: Response) {
     inPath = file.path;
     const userId = String(reqAny.user.id);
 
+    const body = req.body as any;
+    const caption =
+      typeof body?.caption === "string"
+        ? body.caption
+        : body?.caption?.toString?.() ?? "";
+    const music =
+      typeof body?.music === "string"
+        ? body.music
+        : body?.music?.toString?.() ?? "";
+    const allowCommentsRaw = body?.allowComments;
+    const allowComments =
+      typeof allowCommentsRaw === "string"
+        ? allowCommentsRaw === "true"
+        : allowCommentsRaw ?? true;
+
+    const requestedVisibility = normalizeVisibility(body?.visibility);
+    const orgIdsRaw = body?.orgIds ?? body?.org_id ?? body?.org_ids;
+    const orgIdStrings = Array.from(
+      new Set(
+        coerceStringArray(orgIdsRaw)
+          .map((id) => id.trim())
+          .filter(Boolean)
+      )
+    );
+
+    const invalidOrgIds = orgIdStrings.filter(
+      (id) => !Types.ObjectId.isValid(id)
+    );
+    if (invalidOrgIds.length > 0) {
+      return res.status(400).json({
+        message: "Invalid organization id(s)",
+        orgIds: invalidOrgIds,
+      });
+    }
+
+    let orgObjectIds: Types.ObjectId[] = [];
+    if (orgIdStrings.length > 0) {
+      const memberships = await OrganizationMembershipModel.find({
+        user_id: reqAny.user.id,
+        org_id: { $in: orgIdStrings },
+      })
+        .select("org_id")
+        .lean()
+        .exec();
+
+      const allowed = new Set(memberships.map((m: any) => String(m.org_id)));
+      const unauthorized = orgIdStrings.filter((id) => !allowed.has(id));
+      if (unauthorized.length > 0) {
+        return res.status(403).json({
+          message: "You are not a member of the requested organization(s)",
+          orgIds: unauthorized,
+        });
+      }
+      orgObjectIds = orgIdStrings.map((id) => new Types.ObjectId(id));
+    }
+
+    const restrictToOrg =
+      requestedVisibility === "Organizations" || orgObjectIds.length > 0;
+    if (restrictToOrg && orgObjectIds.length === 0) {
+      return res.status(400).json({
+        message: "Organization visibility requires at least one org id",
+      });
+    }
+
+    const tagsFromBody = coerceStringArray(body?.tags).map((tag) =>
+      tag.toLowerCase()
+    );
+    const tagsFromCaption = extractHashtags(caption);
+    const tags = Array.from(new Set([...tagsFromBody, ...tagsFromCaption]));
+
     // 1) Create a Post first to get postId
-    const { caption, music, visibility, allowComments } = req.body as any;
     const post = await PostModel.create({
       user_id: reqAny.user.id,
-      caption: caption || "",
-      music: music || "",
+      caption,
+      music,
+      tags,
       video_src: "temp",
       visibility: "Private",
-      allow_comments:
-        typeof allowComments === "string"
-          ? allowComments === "true"
-          : allowComments ?? true,
+      allow_comments: allowComments,
     });
     const postId = String(post._id);
 
@@ -371,12 +503,27 @@ export async function uploadVideo(req: Request, res: Response) {
     )}/media/photo/${basePath}`;
     post.video_src = video_src;
     post.thumbnail = thumbnail;
-    post.visibility = visibility || "Public";
+    post.visibility = restrictToOrg ? "Organizations" : requestedVisibility;
+    post.tags = tags;
+    post.allow_comments = allowComments;
     await post.save();
+
+    if (orgObjectIds.length > 0) {
+      const payload = orgObjectIds.map((orgId) => ({
+        post_id: post._id,
+        org_id: orgId,
+      }));
+      await PostOrgModel.insertMany(payload, { ordered: false });
+    }
 
     // Cleanup is handled in finally
 
-    return res.status(201).json({ postId, post });
+    return res.status(201).json({
+      postId,
+      post,
+      orgViewIds: orgIdStrings,
+      tags,
+    });
   } catch (err: any) {
     console.error("uploadVideo error", err);
     return res.status(500).json({
