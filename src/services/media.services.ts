@@ -1,7 +1,13 @@
 import { Request, Response } from "express";
+import { randomUUID } from "crypto";
 import { Types } from "mongoose";
 import { minioClient } from "../lib/minio";
-import { OrganizationMembershipModel, PostModel, PostOrgModel } from "../models";
+import {
+  OrganizationMembershipModel,
+  PostModel,
+  PostOrgModel,
+  UserModel,
+} from "../models";
 import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
@@ -72,6 +78,21 @@ function coerceStringArray(value: unknown): string[] {
     return [trimmed];
   }
   return [];
+}
+
+function pickImageExtension(file: Express.Multer.File): string {
+  const fromName = path.extname(file.originalname || "").toLowerCase();
+  if (/^\.[a-z0-9]+$/.test(fromName)) {
+    return fromName;
+  }
+  const subtype = (file.mimetype || "").split("/")[1];
+  if (subtype) {
+    const clean = subtype.split("+")[0]?.replace(/[^a-z0-9]/gi, "").toLowerCase();
+    if (clean) {
+      return `.${clean}`;
+    }
+  }
+  return ".jpg";
 }
 
 async function safeUnlink(p?: string, label?: string) {
@@ -535,5 +556,99 @@ export async function uploadVideo(req: Request, res: Response) {
     await safeUnlink(inPath, "upload temp");
     await safeUnlink(outPath, "transcoded temp");
     await safeUnlink(thumbPath, "thumbnail temp");
+  }
+}
+
+export async function uploadProfileImage(req: Request, res: Response) {
+  let tempPath: string | undefined;
+  try {
+    const reqAny = req as any;
+    if (!reqAny.user?.id)
+      return res.status(401).json({ message: "Unauthorized" });
+
+    const file = reqAny.file as Express.Multer.File | undefined;
+    if (!file)
+      return res.status(400).json({ message: "Missing file 'image'" });
+
+    tempPath = file.path;
+    const userId = String(reqAny.user.id);
+
+    const bucket = process.env.MINIO_BUCKET || "users";
+    await ensureBucket(bucket);
+
+    const ext = pickImageExtension(file);
+    const filename = `${randomUUID()}${ext}`;
+    const objectName = `${userId}/profile/${filename}`;
+    const meta = {
+      "Content-Type": file.mimetype || "image/jpeg",
+    } as any;
+
+    await minioClient.fPutObject(bucket, objectName, file.path, meta);
+
+    const pictureUrl = `${req.protocol}://${req.get("host")}/media/profile/${userId}/${filename}`;
+
+    const updatedUser = await UserModel.findByIdAndUpdate(
+      reqAny.user.id,
+      { picture_url: pictureUrl },
+      { new: true, runValidators: true }
+    ).select("_id username handle picture_url");
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json({
+      message: "Profile image uploaded successfully",
+      pictureUrl,
+      user: updatedUser,
+    });
+  } catch (err: any) {
+    console.error("uploadProfileImage error", err);
+    return res.status(500).json({
+      message: "Failed to upload profile image",
+      error: err?.message || String(err),
+    });
+  } finally {
+    await safeUnlink(tempPath, "profile image temp");
+  }
+}
+
+export async function profilePhoto(req: Request, res: Response) {
+  try {
+    const bucket = process.env.MINIO_BUCKET || "users";
+    const owner = req.params.user;
+    const filename = req.params.filename;
+
+    if (!owner || !filename) {
+      return res.status(400).json({ message: "Missing owner or filename" });
+    }
+
+    const objectKey = `${owner}/profile/${filename}`;
+    const stat = await minioClient.statObject(bucket, objectKey);
+    const size = stat.size as number;
+    const contentType =
+      (stat as any).contentType ||
+      (stat as any).metaData?.["content-type"] ||
+      "image/jpeg";
+
+    const stream = await minioClient.getObject(bucket, objectKey);
+    res.status(200);
+    res.setHeader("Content-Length", String(size));
+    res.setHeader("Content-Type", contentType);
+    if ((stat as any).etag) res.setHeader("ETag", (stat as any).etag);
+    if ((stat as any).lastModified)
+      res.setHeader(
+        "Last-Modified",
+        new Date((stat as any).lastModified).toUTCString()
+      );
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    stream.on("error", () => res.destroy());
+    stream.pipe(res);
+  } catch (err: any) {
+    if (err?.code === "NoSuchKey" || err?.code === "NotFound") {
+      return res.status(404).json({ message: "Profile image not found" });
+    }
+    console.error("profilePhoto error", err);
+    return res.status(500).json({ message: "Failed to stream profile image" });
   }
 }

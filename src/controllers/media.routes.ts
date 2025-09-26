@@ -31,8 +31,29 @@ const upload = multer({
   limits: { fileSize: 1024 * 1024 * 1024 }, // 1GB cap
 });
 
+const imageUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, TEMP_DIR),
+    filename: (_req, file, cb) => {
+      const safe = file.originalname.replace(/[^a-zA-Z0-9_.-]/g, "_");
+      cb(null, `${Date.now()}_${safe}`);
+    },
+  }),
+  fileFilter: (_req, file, cb) => {
+    const ok =
+      /^image\//.test(file.mimetype) ||
+      /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.originalname);
+    cb(null, ok);
+  },
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
+
 mediaRouter.get("/photo/:user/:postId/:object", async (req, res) => {
   await services.photo(req, res);
+});
+
+mediaRouter.get("/profile/:user/:filename", async (req, res) => {
+  await services.profilePhoto(req, res);
 });
 // Proxy stream from MinIO with Range support
 // Example: GET /media/firstbucket/path/to/file.mp4
@@ -44,6 +65,14 @@ mediaRouter.get("/:user/:postId/:object", async (req, res) => {
 mediaRouter.post("/upload", upload.single("video"), async (req, res) => {
   await services.uploadVideo(req, res);
 });
+
+mediaRouter.post(
+  "/upload/profile",
+  imageUpload.single("image"),
+  async (req, res) => {
+    await services.uploadProfileImage(req, res);
+  }
+);
 
 // HEAD for metadata probing (length, type, ranges)
 // mediaRouter.head("/:bucket{/*path}", async (req, res) => {
