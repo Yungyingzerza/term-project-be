@@ -117,6 +117,23 @@ async function getUserProfile(req: Request, res: Response) {
   }
 }
 
+//Get UserId by User handle
+async function getUserIdByHandle(req: Request, res: Response) {
+  try {
+    const { handle } = req.params;
+    if (!handle)
+      return res.status(400).json({ message: "User handle is required" });
+
+    const user = await UserModel.findOne({ handle }).select("_id");
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    return res.status(200).json({ userId: user._id });
+  } catch (error) {
+    console.error("Error in getUserIdByHandle:", error);
+    return res.status(500).json({ message: "Something went wrong!" });
+  }
+}
+
 // Get user's organizations
 async function getUserOrganizations(req: Request, res: Response) {
   try {
@@ -682,4 +699,5 @@ export {
   getSavedVideos,
   getUserOrganizations,
   sendEmailOtp,
+  getUserIdByHandle,
 };
