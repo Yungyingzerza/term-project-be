@@ -13,6 +13,10 @@ userRouter.post("/follow", async (req, res) => {
     await services.followUser(req, res);
 });
 
+userRouter.post("/email/send-otp", async (req, res) => {
+    await services.sendEmailOtp(req, res);
+});
+
 userRouter.post("/email", async (req, res) => {
     await services.createEmail(req, res);
 });
