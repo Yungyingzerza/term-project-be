@@ -15,7 +15,7 @@ const bucket = "users";
   try {
     const exists = await minioClient.bucketExists(bucket);
     if (!exists) {
-      await minioClient.makeBucket(bucket, "thailand");
+      await minioClient.makeBucket(bucket, "");
       console.log(`Bucket "${bucket}" created successfully.`);
     } else {
       console.log(`Bucket "${bucket}" already exists.`);
