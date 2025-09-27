@@ -34,7 +34,7 @@ app.use(
       "http://192.168.1.11:3000",
       "https://chillchill.yungying.com",
     ],
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   })
 );
