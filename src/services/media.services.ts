@@ -1,13 +1,99 @@
 import { Request, Response } from "express";
+import { randomUUID } from "crypto";
+import { Types } from "mongoose";
 import { minioClient } from "../lib/minio";
-import { PostModel } from "../models";
+import {
+  OrganizationMembershipModel,
+  PostModel,
+  PostOrgModel,
+  UserModel,
+} from "../models";
 import fs from "fs";
 import path from "path";
-import { promisify } from "util";
 import { spawn } from "child_process";
-
-const unlinkAsync = promisify(fs.unlink);
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+type VisibilityOption = "Public" | "Friends" | "Private" | "Organizations";
+
+const VISIBILITY_OPTIONS: VisibilityOption[] = [
+  "Public",
+  "Friends",
+  "Private",
+  "Organizations",
+];
+
+function normalizeVisibility(raw: unknown): VisibilityOption {
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed) {
+      const canonical =
+        trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+      if ((VISIBILITY_OPTIONS as string[]).includes(canonical)) {
+        return canonical as VisibilityOption;
+      }
+    }
+  }
+  return "Public";
+}
+
+function extractHashtags(source: unknown): string[] {
+  if (typeof source !== "string") return [];
+  const matches = source.match(/#([\p{L}0-9_]+)/gu) ?? [];
+  const unique = new Set(
+    matches
+      .map((tag) => tag.slice(1).trim())
+      .filter(Boolean)
+      .map((tag) => tag.toLowerCase())
+  );
+  return Array.from(unique);
+}
+
+function coerceStringArray(value: unknown): string[] {
+  if (value == null) return [];
+  if (Array.isArray(value)) {
+    const acc: string[] = [];
+    for (const item of value) {
+      acc.push(...coerceStringArray(item));
+    }
+    return acc;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    if ((trimmed.startsWith("[") && trimmed.endsWith("]")) ||
+        (trimmed.startsWith("\"") && trimmed.endsWith("\""))) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return coerceStringArray(parsed);
+      } catch {
+        // fall through to other parsing strategies
+      }
+    }
+    if (trimmed.includes(",")) {
+      return trimmed
+        .split(",")
+        .map((part) => part.trim())
+        .filter(Boolean);
+    }
+    return [trimmed];
+  }
+  return [];
+}
+
+function pickImageExtension(file: Express.Multer.File): string {
+  const fromName = path.extname(file.originalname || "").toLowerCase();
+  if (/^\.[a-z0-9]+$/.test(fromName)) {
+    return fromName;
+  }
+  const subtype = (file.mimetype || "").split("/")[1];
+  if (subtype) {
+    const clean = subtype.split("+")[0]?.replace(/[^a-z0-9]/gi, "").toLowerCase();
+    if (clean) {
+      return `.${clean}`;
+    }
+  }
+  return ".jpg";
+}
 
 async function safeUnlink(p?: string, label?: string) {
   if (!p) return;
@@ -311,18 +397,85 @@ export async function uploadVideo(req: Request, res: Response) {
     inPath = file.path;
     const userId = String(reqAny.user.id);
 
+    const body = req.body as any;
+    const caption =
+      typeof body?.caption === "string"
+        ? body.caption
+        : body?.caption?.toString?.() ?? "";
+    const music =
+      typeof body?.music === "string"
+        ? body.music
+        : body?.music?.toString?.() ?? "";
+    const allowCommentsRaw = body?.allowComments;
+    const allowComments =
+      typeof allowCommentsRaw === "string"
+        ? allowCommentsRaw === "true"
+        : allowCommentsRaw ?? true;
+
+    const requestedVisibility = normalizeVisibility(body?.visibility);
+    const orgIdsRaw = body?.orgIds ?? body?.org_id ?? body?.org_ids;
+    const orgIdStrings = Array.from(
+      new Set(
+        coerceStringArray(orgIdsRaw)
+          .map((id) => id.trim())
+          .filter(Boolean)
+      )
+    );
+
+    const invalidOrgIds = orgIdStrings.filter(
+      (id) => !Types.ObjectId.isValid(id)
+    );
+    if (invalidOrgIds.length > 0) {
+      return res.status(400).json({
+        message: "Invalid organization id(s)",
+        orgIds: invalidOrgIds,
+      });
+    }
+
+    let orgObjectIds: Types.ObjectId[] = [];
+    if (orgIdStrings.length > 0) {
+      const memberships = await OrganizationMembershipModel.find({
+        user_id: reqAny.user.id,
+        org_id: { $in: orgIdStrings },
+      })
+        .select("org_id")
+        .lean()
+        .exec();
+
+      const allowed = new Set(memberships.map((m: any) => String(m.org_id)));
+      const unauthorized = orgIdStrings.filter((id) => !allowed.has(id));
+      if (unauthorized.length > 0) {
+        return res.status(403).json({
+          message: "You are not a member of the requested organization(s)",
+          orgIds: unauthorized,
+        });
+      }
+      orgObjectIds = orgIdStrings.map((id) => new Types.ObjectId(id));
+    }
+
+    const restrictToOrg =
+      requestedVisibility === "Organizations" || orgObjectIds.length > 0;
+    if (restrictToOrg && orgObjectIds.length === 0) {
+      return res.status(400).json({
+        message: "Organization visibility requires at least one org id",
+      });
+    }
+
+    const tagsFromBody = coerceStringArray(body?.tags).map((tag) =>
+      tag.toLowerCase()
+    );
+    const tagsFromCaption = extractHashtags(caption);
+    const tags = Array.from(new Set([...tagsFromBody, ...tagsFromCaption]));
+
     // 1) Create a Post first to get postId
-    const { caption, music, visibility, allowComments } = req.body as any;
     const post = await PostModel.create({
       user_id: reqAny.user.id,
-      caption: caption || "",
-      music: music || "",
+      caption,
+      music,
+      tags,
       video_src: "temp",
       visibility: "Private",
-      allow_comments:
-        typeof allowComments === "string"
-          ? allowComments === "true"
-          : allowComments ?? true,
+      allow_comments: allowComments,
     });
     const postId = String(post._id);
 
@@ -371,12 +524,27 @@ export async function uploadVideo(req: Request, res: Response) {
     )}/media/photo/${basePath}`;
     post.video_src = video_src;
     post.thumbnail = thumbnail;
-    post.visibility = visibility || "Public";
+    post.visibility = restrictToOrg ? "Organizations" : requestedVisibility;
+    post.tags = tags;
+    post.allow_comments = allowComments;
     await post.save();
+
+    if (orgObjectIds.length > 0) {
+      const payload = orgObjectIds.map((orgId) => ({
+        post_id: post._id,
+        org_id: orgId,
+      }));
+      await PostOrgModel.insertMany(payload, { ordered: false });
+    }
 
     // Cleanup is handled in finally
 
-    return res.status(201).json({ postId, post });
+    return res.status(201).json({
+      postId,
+      post,
+      orgViewIds: orgIdStrings,
+      tags,
+    });
   } catch (err: any) {
     console.error("uploadVideo error", err);
     return res.status(500).json({
@@ -388,5 +556,99 @@ export async function uploadVideo(req: Request, res: Response) {
     await safeUnlink(inPath, "upload temp");
     await safeUnlink(outPath, "transcoded temp");
     await safeUnlink(thumbPath, "thumbnail temp");
+  }
+}
+
+export async function uploadProfileImage(req: Request, res: Response) {
+  let tempPath: string | undefined;
+  try {
+    const reqAny = req as any;
+    if (!reqAny.user?.id)
+      return res.status(401).json({ message: "Unauthorized" });
+
+    const file = reqAny.file as Express.Multer.File | undefined;
+    if (!file)
+      return res.status(400).json({ message: "Missing file 'image'" });
+
+    tempPath = file.path;
+    const userId = String(reqAny.user.id);
+
+    const bucket = process.env.MINIO_BUCKET || "users";
+    await ensureBucket(bucket);
+
+    const ext = pickImageExtension(file);
+    const filename = `${randomUUID()}${ext}`;
+    const objectName = `${userId}/profile/${filename}`;
+    const meta = {
+      "Content-Type": file.mimetype || "image/jpeg",
+    } as any;
+
+    await minioClient.fPutObject(bucket, objectName, file.path, meta);
+
+    const pictureUrl = `${req.protocol}://${req.get("host")}/media/profile/${userId}/${filename}`;
+
+    const updatedUser = await UserModel.findByIdAndUpdate(
+      reqAny.user.id,
+      { picture_url: pictureUrl },
+      { new: true, runValidators: true }
+    ).select("_id username handle picture_url");
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json({
+      message: "Profile image uploaded successfully",
+      pictureUrl,
+      user: updatedUser,
+    });
+  } catch (err: any) {
+    console.error("uploadProfileImage error", err);
+    return res.status(500).json({
+      message: "Failed to upload profile image",
+      error: err?.message || String(err),
+    });
+  } finally {
+    await safeUnlink(tempPath, "profile image temp");
+  }
+}
+
+export async function profilePhoto(req: Request, res: Response) {
+  try {
+    const bucket = process.env.MINIO_BUCKET || "users";
+    const owner = req.params.user;
+    const filename = req.params.filename;
+
+    if (!owner || !filename) {
+      return res.status(400).json({ message: "Missing owner or filename" });
+    }
+
+    const objectKey = `${owner}/profile/${filename}`;
+    const stat = await minioClient.statObject(bucket, objectKey);
+    const size = stat.size as number;
+    const contentType =
+      (stat as any).contentType ||
+      (stat as any).metaData?.["content-type"] ||
+      "image/jpeg";
+
+    const stream = await minioClient.getObject(bucket, objectKey);
+    res.status(200);
+    res.setHeader("Content-Length", String(size));
+    res.setHeader("Content-Type", contentType);
+    if ((stat as any).etag) res.setHeader("ETag", (stat as any).etag);
+    if ((stat as any).lastModified)
+      res.setHeader(
+        "Last-Modified",
+        new Date((stat as any).lastModified).toUTCString()
+      );
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    stream.on("error", () => res.destroy());
+    stream.pipe(res);
+  } catch (err: any) {
+    if (err?.code === "NoSuchKey" || err?.code === "NotFound") {
+      return res.status(404).json({ message: "Profile image not found" });
+    }
+    console.error("profilePhoto error", err);
+    return res.status(500).json({ message: "Failed to stream profile image" });
   }
 }
