@@ -8,3 +8,19 @@ export const minioClient = new Minio.Client({
   secretKey: process.env.MINIO_SECRET_KEY || "minioadmin",
 });
 
+//initialize bucket
+const bucket = "users";
+
+(async () => {
+  try {
+    const exists = await minioClient.bucketExists(bucket);
+    if (!exists) {
+      await minioClient.makeBucket(bucket, "thailand");
+      console.log(`Bucket "${bucket}" created successfully.`);
+    } else {
+      console.log(`Bucket "${bucket}" already exists.`);
+    }
+  } catch (err) {
+    console.error("Error in bucket initialization:", err);
+  }
+})();
