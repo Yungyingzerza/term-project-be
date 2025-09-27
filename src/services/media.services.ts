@@ -80,6 +80,60 @@ function coerceStringArray(value: unknown): string[] {
   return [];
 }
 
+function firstHeader(req: Request, header: string): string | undefined {
+  const value = req.get(header);
+  if (!value) return undefined;
+  return value.split(",")[0]?.trim() || undefined;
+}
+
+function resolveConfiguredBase(): string | undefined {
+  const raw = process.env.PUBLIC_BASE_URL?.trim();
+  if (!raw) return undefined;
+  try {
+    const url = new URL(raw);
+    const pathname = url.pathname.replace(/\/+$/, "");
+    return `${url.origin}${pathname === "/" ? "" : pathname}`;
+  } catch {
+    return raw.replace(/\/+$/, "");
+  }
+}
+
+function resolvePublicBase(req: Request): string {
+  const configured = resolveConfiguredBase();
+  if (configured) return configured;
+
+  const proto = firstHeader(req, "X-Forwarded-Proto") || req.protocol;
+  const host =
+    firstHeader(req, "X-Forwarded-Host") || req.get("host") || "localhost";
+  const forwardedPort = firstHeader(req, "X-Forwarded-Port");
+
+  let origin = `${proto}://${host}`;
+  if (forwardedPort && !host.includes(":")) {
+    origin = `${proto}://${host}:${forwardedPort}`;
+  }
+
+  const prefixSource =
+    process.env.PUBLIC_BASE_PATH?.trim() || firstHeader(req, "X-Forwarded-Prefix");
+  if (prefixSource) {
+    const normalized = prefixSource
+      .split("/")
+      .filter(Boolean)
+      .join("/");
+    if (normalized) {
+      origin = `${origin}/${normalized}`;
+    }
+  }
+
+  return origin.replace(/\/+$/, "");
+}
+
+function buildPublicUrl(req: Request, pathname: string): string {
+  const base = resolvePublicBase(req);
+  const baseWithSlash = base.endsWith("/") ? base : `${base}/`;
+  const relativePath = pathname.replace(/^\/+/, "");
+  return new URL(relativePath, baseWithSlash).toString();
+}
+
 function pickImageExtension(file: Express.Multer.File): string {
   const fromName = path.extname(file.originalname || "").toLowerCase();
   if (/^\.[a-z0-9]+$/.test(fromName)) {
@@ -518,10 +572,8 @@ export async function uploadVideo(req: Request, res: Response) {
     }
 
     // 6) Update Post with video_src and thumbnail
-    const video_src = `${req.protocol}://${req.get("host")}/media/${basePath}`;
-    const thumbnail = `${req.protocol}://${req.get(
-      "host"
-    )}/media/photo/${basePath}`;
+    const video_src = buildPublicUrl(req, `media/${basePath}`);
+    const thumbnail = buildPublicUrl(req, `media/photo/${basePath}`);
     post.video_src = video_src;
     post.thumbnail = thumbnail;
     post.visibility = restrictToOrg ? "Organizations" : requestedVisibility;
@@ -585,7 +637,10 @@ export async function uploadProfileImage(req: Request, res: Response) {
 
     await minioClient.fPutObject(bucket, objectName, file.path, meta);
 
-    const pictureUrl = `${req.protocol}://${req.get("host")}/media/profile/${userId}/${filename}`;
+    const pictureUrl = buildPublicUrl(
+      req,
+      `media/profile/${userId}/${filename}`
+    );
 
     const updatedUser = await UserModel.findByIdAndUpdate(
       reqAny.user.id,
