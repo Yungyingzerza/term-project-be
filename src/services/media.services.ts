@@ -112,8 +112,11 @@ function resolvePublicBase(req: Request): string {
     origin = `${proto}://${host}:${forwardedPort}`;
   }
 
-  const prefixSource =
+  let prefixSource =
     process.env.PUBLIC_BASE_PATH?.trim() || firstHeader(req, "X-Forwarded-Prefix");
+  if (!prefixSource && process.env.NODE_ENV === "production") {
+    prefixSource = "chillchill";
+  }
   if (prefixSource) {
     const normalized = prefixSource
       .split("/")
