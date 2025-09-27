@@ -6,7 +6,7 @@ export const minioClient = new Minio.Client({
   useSSL: process.env.MINIO_USE_SSL === "true" || false,
   accessKey: process.env.MINIO_ACCESS_KEY || "minioadmin",
   secretKey: process.env.MINIO_SECRET_KEY || "minioadmin",
-  region: "ap-southeast-7",
+  region: "us-east-1",
 });
 
 //initialize bucket
@@ -16,7 +16,7 @@ const bucket = "users";
   try {
     const exists = await minioClient.bucketExists(bucket);
     if (!exists) {
-      await minioClient.makeBucket(bucket, "ap-southeast-7");
+      await minioClient.makeBucket(bucket, "us-east-1");
       console.log(`Bucket "${bucket}" created successfully.`);
     } else {
       console.log(`Bucket "${bucket}" already exists.`);
