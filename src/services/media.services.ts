@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import { Types } from "mongoose";
 import { minioClient } from "../lib/minio";
 import {
+  FollowModel,
   OrganizationMembershipModel,
   PostModel,
   PostOrgModel,
@@ -184,6 +185,110 @@ function parseRange(rangeHeader: string | undefined, size: number) {
   return { start, end } as const;
 }
 
+type LeanPost = {
+  _id: Types.ObjectId;
+  user_id: Types.ObjectId;
+  visibility: VisibilityOption;
+};
+
+async function ensureCanViewPost(
+  req: Request,
+  res: Response,
+  ownerParam: string | undefined,
+  postId: string | undefined
+): Promise<LeanPost | null> {
+  if (!postId || !Types.ObjectId.isValid(postId)) {
+    res.status(404).json({ message: "Post not found" });
+    return null;
+  }
+
+  const post = (await PostModel.findById(postId)
+    .select("_id user_id visibility")
+    .lean()
+    .exec()) as LeanPost | null;
+
+  if (!post) {
+    res.status(404).json({ message: "Post not found" });
+    return null;
+  }
+
+  const ownerId = post.user_id.toString();
+  if (ownerParam && ownerParam !== ownerId) {
+    res.status(404).json({ message: "Post not found" });
+    return null;
+  }
+
+  const reqAny = req as any;
+  const viewerRaw = reqAny.user?.id ?? null;
+  const viewerId = viewerRaw ? viewerRaw.toString() : undefined;
+
+  if (post.visibility === "Public") {
+    return post;
+  }
+
+  if (viewerId && viewerId === ownerId) {
+    return post;
+  }
+
+  if (!viewerRaw) {
+    res.status(403).json({ message: "Post is not accessible" });
+    return null;
+  }
+
+  switch (post.visibility) {
+    case "Private": {
+      res.status(403).json({ message: "Post is not accessible" });
+      return null;
+    }
+    case "Friends": {
+      const [viewerFollowsOwner, ownerFollowsViewer] = await Promise.all([
+        FollowModel.exists({
+          follower_id: viewerRaw,
+          followee_id: post.user_id,
+        }).exec(),
+        FollowModel.exists({
+          follower_id: post.user_id,
+          followee_id: viewerRaw,
+        }).exec(),
+      ]);
+
+      if (viewerFollowsOwner && ownerFollowsViewer) {
+        return post;
+      }
+
+      res.status(403).json({ message: "Post is not accessible" });
+      return null;
+    }
+    case "Organizations": {
+      const postOrgs = await PostOrgModel.find({ post_id: post._id })
+        .select("org_id")
+        .lean()
+        .exec();
+      const orgIds = postOrgs.map((entry: any) => entry.org_id);
+      if (orgIds.length === 0) {
+        res.status(403).json({ message: "Post is not accessible" });
+        return null;
+      }
+
+      const membership = await OrganizationMembershipModel.exists({
+        user_id: viewerRaw,
+        org_id: { $in: orgIds },
+      }).exec();
+
+      if (membership) {
+        return post;
+      }
+
+      res.status(403).json({ message: "Post is not accessible" });
+      return null;
+    }
+    default: {
+      res.status(403).json({ message: "Post is not accessible" });
+      return null;
+    }
+  }
+}
+
 export async function streamObject(req: Request, res: Response) {
   try {
     const bucket = "users";
@@ -194,6 +299,8 @@ export async function streamObject(req: Request, res: Response) {
     if (!bucket || !objectKeyBase) {
       return res.status(400).json({ message: "Missing bucket or object key" });
     }
+
+    if (!(await ensureCanViewPost(req, res, owner, postId))) return;
 
     const objectKeyWithExtension = `${owner}/${postId}/${objectKeyBase}.mp4`;
 
@@ -256,6 +363,7 @@ export async function photo(req: Request, res: Response) {
     if (!objectKeyBase) {
       return res.status(400).json({ message: "Missing object key" });
     }
+    if (!(await ensureCanViewPost(req, res, owner, postId))) return;
     const objectKey = `${owner}/${postId}/${objectKeyBase}.jpg`;
 
     const stat = await minioClient.statObject(bucket, objectKey);

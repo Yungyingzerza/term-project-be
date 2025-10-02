@@ -44,3 +44,6 @@ export type { Follow } from "./follow.model";
 
 export { LineAccountModel } from "./lineAccount.model";
 export type { LineAccount } from "./lineAccount.model";
+
+export { ViewModel } from "./view.model";
+export type { View } from "./view.model";
