@@ -618,9 +618,8 @@ export async function uploadVideo(req: Request, res: Response) {
       orgObjectIds = orgIdStrings.map((id) => new Types.ObjectId(id));
     }
 
-    const restrictToOrg =
-      requestedVisibility === "Organizations" || orgObjectIds.length > 0;
-    if (restrictToOrg && orgObjectIds.length === 0) {
+    const wantsOrgOnlyVisibility = requestedVisibility === "Organizations";
+    if (wantsOrgOnlyVisibility && orgObjectIds.length === 0) {
       return res.status(400).json({
         message: "Organization visibility requires at least one org id",
       });
@@ -687,7 +686,9 @@ export async function uploadVideo(req: Request, res: Response) {
     const thumbnail = buildPublicUrl(req, `media/photo/${basePath}`);
     post.video_src = video_src;
     post.thumbnail = thumbnail;
-    post.visibility = restrictToOrg ? "Organizations" : requestedVisibility;
+    post.visibility = wantsOrgOnlyVisibility
+      ? "Organizations"
+      : requestedVisibility;
     post.tags = tags;
     post.allow_comments = allowComments;
     await post.save();
