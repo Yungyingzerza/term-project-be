@@ -578,14 +578,34 @@ export async function uploadVideo(req: Request, res: Response) {
         : allowCommentsRaw ?? true;
 
     const requestedVisibility = normalizeVisibility(body?.visibility);
+    const wantsOrgOnlyVisibility = requestedVisibility === "Organizations";
     const orgIdsRaw = body?.orgIds ?? body?.org_id ?? body?.org_ids;
-    const orgIdStrings = Array.from(
+    let orgIdStrings = Array.from(
       new Set(
         coerceStringArray(orgIdsRaw)
           .map((id) => id.trim())
           .filter(Boolean)
       )
     );
+
+    let membershipDocs:
+      | { org_id: Types.ObjectId | string }[]
+      | null
+      | undefined = null;
+
+    if (wantsOrgOnlyVisibility && orgIdStrings.length === 0) {
+      membershipDocs = await OrganizationMembershipModel.find({
+        user_id: reqAny.user.id,
+      })
+        .select("org_id")
+        .lean()
+        .exec();
+      orgIdStrings = Array.from(
+        new Set(
+          (membershipDocs || []).map((entry: any) => String(entry.org_id))
+        )
+      );
+    }
 
     const invalidOrgIds = orgIdStrings.filter(
       (id) => !Types.ObjectId.isValid(id)
@@ -599,13 +619,15 @@ export async function uploadVideo(req: Request, res: Response) {
 
     let orgObjectIds: Types.ObjectId[] = [];
     if (orgIdStrings.length > 0) {
-      const memberships = await OrganizationMembershipModel.find({
-        user_id: reqAny.user.id,
-        org_id: { $in: orgIdStrings },
-      })
-        .select("org_id")
-        .lean()
-        .exec();
+      const memberships =
+        membershipDocs ??
+        (await OrganizationMembershipModel.find({
+          user_id: reqAny.user.id,
+          org_id: { $in: orgIdStrings },
+        })
+          .select("org_id")
+          .lean()
+          .exec());
 
       const allowed = new Set(memberships.map((m: any) => String(m.org_id)));
       const unauthorized = orgIdStrings.filter((id) => !allowed.has(id));
@@ -618,10 +640,13 @@ export async function uploadVideo(req: Request, res: Response) {
       orgObjectIds = orgIdStrings.map((id) => new Types.ObjectId(id));
     }
 
-    const wantsOrgOnlyVisibility = requestedVisibility === "Organizations";
     if (wantsOrgOnlyVisibility && orgObjectIds.length === 0) {
+      const message =
+        orgIdStrings.length === 0
+          ? "You must belong to at least one organization to use organization visibility"
+          : "Organization visibility requires at least one org id";
       return res.status(400).json({
-        message: "Organization visibility requires at least one org id",
+        message,
       });
     }
 

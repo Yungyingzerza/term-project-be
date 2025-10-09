@@ -13,6 +13,11 @@ feedRouter.get("/user/handle/:handle", async (req, res) => {
   await services.getFeedByUserHandle(req, res);
 });
 
+// GET /feed/organization/:orgId?limit&cursor
+feedRouter.get("/organization/:orgId", async (req, res) => {
+  await services.getFeedByOrganizationId(req, res);
+});
+
 // PUT /feed/:postId/reaction { key: ReactionKey }
 feedRouter.put("/:postId/reaction", async (req, res) => {
   await services.reactToPost(req, res);

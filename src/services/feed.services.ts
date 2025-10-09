@@ -1,7 +1,11 @@
 import { Request, Response } from "express";
+import { Types } from "mongoose";
 import type { ReactionKey, Visibility } from "../models/enums";
 import {
+  OrganizationMembershipModel,
+  OrganizationModel,
   PostModel,
+  PostOrgModel,
   PostReactionModel,
   PostSaveModel,
   PostCommentModel,
@@ -190,6 +194,174 @@ export async function getFeed(req: Request, res: Response) {
   }
 }
 
+export async function getFeedByOrganizationId(req: Request, res: Response) {
+  try {
+    const { orgId } = req.params as { orgId: string };
+    if (!Types.ObjectId.isValid(orgId)) {
+      return res.status(400).json({ message: "Invalid organization id" });
+    }
+
+    const limit = parseLimit(req.query.limit);
+    const cursor = decodeCursor(req.query.cursor as string | undefined);
+    const orgObjectId = new Types.ObjectId(orgId);
+
+    const organizationExists = await OrganizationModel.exists({
+      _id: orgObjectId,
+    }).exec();
+    if (!organizationExists) {
+      return res.status(404).json({ message: "Organization not found" });
+    }
+
+    const viewerId = (req as any)?.user?.id?.toString();
+    const membership = viewerId
+      ? await OrganizationMembershipModel.exists({
+          org_id: orgObjectId,
+          user_id: viewerId,
+        }).exec()
+      : null;
+    const isMember = Boolean(membership);
+
+    const postOrgLinks = await PostOrgModel.find({ org_id: orgObjectId })
+      .select("post_id")
+      .lean()
+      .exec();
+    if (postOrgLinks.length === 0) {
+      return res
+        .status(200)
+        .json({ items: [], paging: { hasMore: false, nextCursor: null } });
+    }
+
+    const postIds = postOrgLinks.map((link: any) => link.post_id);
+    const visibilityFilter = isMember
+      ? { $in: ["Public", "Organizations"] as Visibility[] }
+      : "Public";
+
+    const baseFilter: Record<string, unknown> = {
+      _id: { $in: postIds },
+      visibility: visibilityFilter,
+    };
+    const rangeFilter = buildCursorFilter(cursor);
+    const filter = { ...baseFilter, ...rangeFilter };
+    const sort = { created_at: -1 as const, _id: -1 as const };
+
+    const posts = await PostModel.find(filter)
+      .sort(sort)
+      .limit(limit + 1)
+      .exec();
+
+    const hasMore = posts.length > limit;
+    const pageItems = hasMore ? posts.slice(0, limit) : posts;
+
+    if (pageItems.length === 0) {
+      return res
+        .status(200)
+        .json({ items: [], paging: { hasMore: false, nextCursor: null } });
+    }
+
+    const userIds = pageItems.map((p) => p.user_id);
+    const users = await UserModel.find({ _id: { $in: userIds } })
+      .lean()
+      .exec();
+    const userMap = new Map(users.map((u) => [u._id.toString(), u]));
+
+    const pagePostIds = pageItems.map((p) => p._id);
+    const orgAssociations = await PostOrgModel.find({
+      post_id: { $in: pagePostIds },
+    })
+      .select("post_id org_id")
+      .lean()
+      .exec();
+    const orgMap = new Map<string, string[]>();
+    for (const assoc of orgAssociations) {
+      const key = assoc.post_id.toString();
+      const list = orgMap.get(key);
+      const orgIdStr = assoc.org_id.toString();
+      if (list) {
+        if (!list.includes(orgIdStr)) list.push(orgIdStr);
+      } else {
+        orgMap.set(key, [orgIdStr]);
+      }
+    }
+
+    const postIdsForViewer = pageItems.map((p) => p._id.toString());
+    let reactionMap = new Map<string, ReactionKey>();
+    let savedSet = new Set<string>();
+    if (viewerId && postIdsForViewer.length > 0) {
+      const [reactions, saves] = await Promise.all([
+        PostReactionModel.find({
+          post_id: { $in: postIdsForViewer },
+          user_id: viewerId,
+        })
+          .lean()
+          .exec(),
+        PostSaveModel.find({
+          post_id: { $in: postIdsForViewer },
+          user_id: viewerId,
+        })
+          .lean()
+          .exec(),
+      ]);
+      reactionMap = new Map(
+        reactions.map((r: any) => [r.post_id.toString(), r.key as ReactionKey])
+      );
+      savedSet = new Set(saves.map((s: any) => s.post_id.toString()));
+    }
+
+    const items = pageItems.map((post) => {
+      const id = post._id.toString();
+      const user = userMap.get(post.user_id.toString());
+      return {
+        id,
+        user: {
+          handle: user?.handle || "unknown",
+          name: user?.username || "Unknown User",
+          avatar: user?.picture_url || "https://i.pravatar.cc/100?img=1",
+        },
+        caption: post.caption ?? "",
+        music: post.music ?? "",
+        interactions: {
+          like: post.like_count ?? 0,
+          love: post.love_count ?? 0,
+          haha: post.haha_count ?? 0,
+          sad: post.sad_count ?? 0,
+          angry: post.angry_count ?? 0,
+        },
+        comments: post.comments_count ?? 0,
+        saves: post.saves_count ?? 0,
+        thumbnail: post.thumbnail ?? "",
+        tags: post.tags ?? [],
+        videoSrc: post.video_src ?? "",
+        visibility: post.visibility,
+        allowComments: post.allow_comments,
+        orgViewIds: orgMap.get(id) ?? [],
+        createdAt: post.created_at?.toISOString() ?? new Date().toISOString(),
+        updatedAt: post.updated_at?.toISOString() ?? new Date().toISOString(),
+        viewer: {
+          saved: savedSet.has(id),
+          reaction: reactionMap.get(id),
+        },
+      } as PostDTO;
+    });
+
+    const nextCursor = hasMore
+      ? encodeCursor({
+          createdAt: pageItems[pageItems.length - 1].created_at.toISOString(),
+          id: pageItems[pageItems.length - 1]._id.toString(),
+        })
+      : null;
+
+    return res.status(200).json({
+      items,
+      paging: { hasMore, nextCursor },
+    });
+  } catch (error) {
+    console.error("getFeedByOrganizationId error", error);
+    return res
+      .status(500)
+      .json({ message: "Failed to get feed for organization" });
+  }
+}
+
 // GET /feed/user/handle/:handle?limit&cursor
 export async function getFeedByUserHandle(req: Request, res: Response) {
   try {
@@ -309,7 +481,30 @@ export async function getPostById(req: Request, res: Response) {
     const authorId = post.user_id.toString();
     const isOwner = viewerId && viewerId === authorId;
 
-    if (!isOwner && post.visibility !== "Public") {
+    let orgViewIds: string[] = [];
+    let canView = Boolean(isOwner) || post.visibility === "Public";
+
+    if (post.visibility === "Organizations") {
+      const orgLinks = await PostOrgModel.find({ post_id: post._id })
+        .select("org_id")
+        .lean()
+        .exec();
+      orgViewIds = orgLinks.map((link: any) => link.org_id.toString());
+
+      if (!canView) {
+        if (!viewerId || orgViewIds.length === 0) {
+          return res.status(403).json({ message: "Post is not accessible" });
+        }
+        const membership = await OrganizationMembershipModel.exists({
+          user_id: viewerId,
+          org_id: { $in: orgViewIds },
+        }).exec();
+        if (!membership) {
+          return res.status(403).json({ message: "Post is not accessible" });
+        }
+        canView = true;
+      }
+    } else if (!canView) {
       return res.status(403).json({ message: "Post is not accessible" });
     }
 
@@ -352,6 +547,7 @@ export async function getPostById(req: Request, res: Response) {
       videoSrc: post.video_src ?? "",
       visibility: post.visibility,
       allowComments: post.allow_comments,
+      orgViewIds,
       createdAt: post.created_at?.toISOString() ?? new Date().toISOString(),
       updatedAt: post.updated_at?.toISOString() ?? new Date().toISOString(),
       viewer: viewer ?? { saved: false, reaction: undefined },
