@@ -402,7 +402,6 @@ type ProbeInfo = {
   width: number;
   height: number;
   fps: number;
-  audioBitrateK: number | null;
 };
 
 async function ffprobe(filePath: string): Promise<ProbeInfo> {
@@ -436,39 +435,7 @@ async function ffprobe(filePath: string): Promise<ProbeInfo> {
           ? Number(fpsParts[0]) / Number(fpsParts[1])
           : Number(fpsStr);
 
-      // Probe audio bitrate (kbps)
-      const aargs = [
-        "-v",
-        "error",
-        "-select_streams",
-        "a:0",
-        "-show_entries",
-        "stream=bit_rate",
-        "-of",
-        "default=nw=1:nk=1",
-        filePath,
-      ];
-      const aproc = spawn("ffprobe", aargs);
-      let aout = "";
-      let aerr = "";
-      aproc.stdout.on("data", (d) => (aout += d.toString()));
-      aproc.stderr.on("data", (d) => (aerr += d.toString()));
-      aproc.on("close", (acode) => {
-        if (acode !== 0) {
-          // No audio stream fallback
-          return resolve({
-            width,
-            height,
-            fps: Math.round(fps) || 30,
-            audioBitrateK: null,
-          });
-        }
-        const bit = parseInt(aout.trim(), 10);
-        const audioBitrateK = Number.isFinite(bit)
-          ? Math.round(bit / 1000)
-          : null;
-        resolve({ width, height, fps: Math.round(fps) || 30, audioBitrateK });
-      });
+      resolve({ width, height, fps: Math.round(fps) || 30 });
     });
   });
 }
@@ -476,9 +443,9 @@ async function ffprobe(filePath: string): Promise<ProbeInfo> {
 function runFfmpeg(
   input: string,
   output: string,
-  opts: { height: number; fps: number; audioBitrateK: number | null }
+  opts: { height: number; fps: number }
 ) {
-  const { height, fps, audioBitrateK } = opts;
+  const { height, fps } = opts;
   const args = [
     "-y",
     "-i",
@@ -499,7 +466,8 @@ function runFfmpeg(
     "5.2",
     "-x264-params",
     "keyint=240:min-keyint=240:scenecut=0:vbv-maxrate=24000:vbv-bufsize=48000",
-    ...(audioBitrateK ? ["-c:a", "aac", "-b:a", `${audioBitrateK}k`] : ["-an"]),
+    "-c:a",
+    "copy",
     "-movflags",
     "+faststart",
     output,
@@ -679,7 +647,6 @@ export async function uploadVideo(req: Request, res: Response) {
     await runFfmpeg(file.path, outPath, {
       height: info.height || 1080,
       fps: info.fps || 30,
-      audioBitrateK: info.audioBitrateK ?? 128,
     });
 
     // 4) Upload to MinIO
@@ -890,7 +857,6 @@ export async function uploadVideoMock(req: Request, res: Response) {
     await runFfmpeg(file.path, outPath, {
       height: info.height || 1080,
       fps: info.fps || 30,
-      audioBitrateK: info.audioBitrateK ?? 128,
     });
 
     // 4) Upload to MinIO
