@@ -9,6 +9,7 @@ import {
   PostReactionModel,
   PostSaveModel,
   PostCommentModel,
+  FollowModel,
   UserModel,
   ViewModel,
 } from "../models";
@@ -88,6 +89,52 @@ function buildCursorFilter(cursor: CursorToken | null) {
   };
 }
 
+const WATCH_HISTORY_EXCLUSION_LIMIT = 750; // cap to keep $nin manageable while hiding recent watches
+const HOUR_IN_MS = 60 * 60 * 1000;
+
+function deterministicJitter(seed: string): number {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = (hash * 33 + seed.charCodeAt(i)) >>> 0;
+  }
+  return (hash % 1000) / 1000;
+}
+
+function computePostScore(
+  post: any,
+  nowMs: number,
+  jitterSeed: string
+): number {
+  const createdAt =
+    post.created_at instanceof Date
+      ? post.created_at
+      : new Date(post.created_at);
+  const ageHours = Math.max(
+    0,
+    (nowMs - createdAt.getTime()) / HOUR_IN_MS
+  );
+  const recencyScore = Math.exp(-ageHours / 12) * 24;
+
+  const totalReactions =
+    (post.like_count ?? 0) +
+    (post.love_count ?? 0) +
+    (post.haha_count ?? 0) +
+    (post.sad_count ?? 0) +
+    (post.angry_count ?? 0);
+  const engagementSignal =
+    totalReactions * 2 +
+    (post.comments_count ?? 0) * 3 +
+    (post.saves_count ?? 0) * 4 +
+    Math.floor((post.views_count ?? 0) / 5);
+  const engagementScore = Math.log1p(Math.max(0, engagementSignal));
+
+  const jitter = deterministicJitter(
+    `${post._id?.toString?.() ?? ""}:${jitterSeed}`
+  );
+
+  return recencyScore * 1.2 + engagementScore * 7 + jitter * 18;
+}
+
 export async function getFeed(req: Request, res: Response) {
   try {
     const algoRaw = (req.query.algo as string) || "for-you";
@@ -96,16 +143,174 @@ export async function getFeed(req: Request, res: Response) {
     const limit = parseLimit(req.query.limit);
     const cursor = decodeCursor(req.query.cursor as string | undefined);
 
-    // Base filters (adjust to your auth/visibility logic)
-    const baseFilter = { visibility: "Public" as Visibility };
+    const reqAny = req as any;
+    const viewerIdStr = reqAny?.user?.id?.toString?.();
+    const viewerObjectId = viewerIdStr ? new Types.ObjectId(viewerIdStr) : null;
 
-    // Apply cursor range if provided
+    let followeeIds: Types.ObjectId[] = [];
+    let friendIds: Types.ObjectId[] = [];
+    let accessibleOrgPostIds: Types.ObjectId[] = [];
+    const watchTimeMap = new Map<string, number>();
+    let watchedObjectIds: Types.ObjectId[] = [];
+
+    if (viewerObjectId) {
+      const [followingDocs, followerDocs, membershipDocs, viewDocs] =
+        await Promise.all([
+          FollowModel.find({ follower_id: viewerObjectId })
+            .select("followee_id")
+            .lean()
+            .exec(),
+          FollowModel.find({ followee_id: viewerObjectId })
+            .select("follower_id")
+            .lean()
+            .exec(),
+          OrganizationMembershipModel.find({ user_id: viewerObjectId })
+            .select("org_id")
+            .lean()
+            .exec(),
+          ViewModel.find({ user_id: viewerObjectId })
+            .sort({ updated_at: -1 })
+            .limit(WATCH_HISTORY_EXCLUSION_LIMIT)
+            .select("post_id watch_time")
+            .lean()
+            .exec(),
+        ]);
+
+      const followerSet = new Set(
+        followerDocs.map((entry: any) => entry.follower_id.toString())
+      );
+
+      followeeIds = followingDocs.map(
+        (entry: any) => entry.followee_id as Types.ObjectId
+      );
+
+      friendIds = followeeIds.filter((followee) =>
+        followerSet.has(followee.toString())
+      );
+
+      const seenWatched = new Set<string>();
+      watchedObjectIds = [];
+      for (const view of viewDocs) {
+        const idStr = view.post_id?.toString?.();
+        if (!idStr || seenWatched.has(idStr)) continue;
+        seenWatched.add(idStr);
+        watchTimeMap.set(
+          idStr,
+          typeof view.watch_time === "number" ? view.watch_time : 0
+        );
+        watchedObjectIds.push(new Types.ObjectId(idStr));
+      }
+
+      if (membershipDocs.length > 0) {
+        const orgIds = membershipDocs.map(
+          (entry: any) => entry.org_id as Types.ObjectId
+        );
+        if (orgIds.length > 0) {
+          const postLinks = await PostOrgModel.find({
+            org_id: { $in: orgIds },
+          })
+            .select("post_id")
+            .lean()
+            .exec();
+          accessibleOrgPostIds = postLinks.map(
+            (link: any) => link.post_id as Types.ObjectId
+          );
+        }
+      }
+    }
+
+    const friendSet = new Set(friendIds.map((id) => id.toString()));
+    const followingOnlyIds = followeeIds.filter(
+      (id) => !friendSet.has(id.toString())
+    );
+
+    const visibilityClauses: Record<string, unknown>[] = [];
+
+    if (algo === "following") {
+      if (!viewerObjectId) {
+        return res.status(200).json({
+          algo,
+          items: [],
+          paging: { hasMore: false, nextCursor: null },
+        });
+      }
+
+      if (followingOnlyIds.length > 0) {
+        visibilityClauses.push({
+          user_id: { $in: followingOnlyIds },
+          visibility: "Public" as Visibility,
+        });
+      }
+
+      if (friendIds.length > 0) {
+        visibilityClauses.push({
+          user_id: { $in: friendIds },
+          visibility: { $in: ["Public", "Friends"] as Visibility[] },
+        });
+      }
+
+      visibilityClauses.push({ user_id: viewerObjectId });
+
+      if (accessibleOrgPostIds.length > 0) {
+        visibilityClauses.push({
+          _id: { $in: accessibleOrgPostIds },
+          visibility: "Organizations" as Visibility,
+        });
+      }
+    } else {
+      visibilityClauses.push({ visibility: "Public" as Visibility });
+      if (viewerObjectId) {
+        visibilityClauses.push({ user_id: viewerObjectId });
+        if (followeeIds.length > 0) {
+          visibilityClauses.push({
+            user_id: { $in: followeeIds },
+            visibility: "Public" as Visibility,
+          });
+        }
+        if (friendIds.length > 0) {
+          visibilityClauses.push({
+            user_id: { $in: friendIds },
+            visibility: { $in: ["Public", "Friends"] as Visibility[] },
+          });
+        }
+        if (accessibleOrgPostIds.length > 0) {
+          visibilityClauses.push({
+            _id: { $in: accessibleOrgPostIds },
+            visibility: "Organizations" as Visibility,
+          });
+        }
+      }
+    }
+
+    if (visibilityClauses.length === 0) {
+      return res.status(200).json({
+        algo,
+        items: [],
+        paging: { hasMore: false, nextCursor: null },
+      });
+    }
+
+    const visibilityFilter =
+      visibilityClauses.length === 1
+        ? visibilityClauses[0]
+        : { $or: visibilityClauses };
+
     const rangeFilter = buildCursorFilter(cursor);
-    const filter = { ...baseFilter, ...rangeFilter };
+    const filterParts: Record<string, unknown>[] = [visibilityFilter];
+
+    if (rangeFilter && Object.keys(rangeFilter).length > 0) {
+      filterParts.push(rangeFilter);
+    }
+
+    if (watchedObjectIds.length > 0) {
+      filterParts.push({ _id: { $nin: watchedObjectIds } });
+    }
+
+    const filter =
+      filterParts.length === 1 ? filterParts[0] : { $and: filterParts };
 
     const sort = { created_at: -1 as const, _id: -1 as const };
 
-    // Over-fetch by 1 to know if there's another page
     const posts = await PostModel.find(filter)
       .sort(sort)
       .limit(limit + 1)
@@ -114,25 +319,80 @@ export async function getFeed(req: Request, res: Response) {
     const hasMore = posts.length > limit;
     const pageItems = hasMore ? posts.slice(0, limit) : posts;
 
-    // Preload users in batch (fewer roundtrips)
-    const userIds = pageItems.map((p) => p.user_id);
-    const users = await UserModel.find({ _id: { $in: userIds } })
+    if (pageItems.length === 0) {
+      return res.status(200).json({
+        algo,
+        items: [],
+        paging: { hasMore: false, nextCursor: null },
+      });
+    }
+
+    const pagePostIds = pageItems.map((p) => p._id);
+    const orgMap = new Map<string, string[]>();
+    if (pagePostIds.length > 0) {
+      const orgAssociations = await PostOrgModel.find({
+        post_id: { $in: pagePostIds },
+      })
+        .select("post_id org_id")
+        .lean()
+        .exec();
+      for (const assoc of orgAssociations) {
+        const key = assoc.post_id.toString();
+        const orgIdStr = assoc.org_id.toString();
+        const existing = orgMap.get(key);
+        if (existing) {
+          if (!existing.includes(orgIdStr)) existing.push(orgIdStr);
+        } else {
+          orgMap.set(key, [orgIdStr]);
+        }
+      }
+    }
+
+    const nowMs = Date.now();
+    const jitterSeed = Math.random().toString(36).slice(2);
+    const orderedPageItems = pageItems
+      .map((post) => ({
+        post,
+        score: computePostScore(post, nowMs, jitterSeed),
+      }))
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        const bTime =
+          b.post.created_at instanceof Date
+            ? b.post.created_at.getTime()
+            : new Date(b.post.created_at).getTime();
+        const aTime =
+          a.post.created_at instanceof Date
+            ? a.post.created_at.getTime()
+            : new Date(a.post.created_at).getTime();
+        if (bTime !== aTime) return bTime - aTime;
+        return b.post._id.toString().localeCompare(a.post._id.toString());
+      })
+      .map((entry) => entry.post);
+
+    const uniqueUserIds = Array.from(
+      new Set(orderedPageItems.map((p) => p.user_id.toString()))
+    ).map((id) => new Types.ObjectId(id));
+    const users = await UserModel.find({ _id: { $in: uniqueUserIds } })
       .lean()
       .exec();
     const userMap = new Map(users.map((u) => [u._id.toString(), u]));
 
-    // Viewer context (optional)
-    const viewerId = (req as any)?.user?.id?.toString();
-    const postIds = pageItems.map((p) => p._id.toString());
-
+    const orderedIds = orderedPageItems.map((p) => p._id.toString());
     let reactionMap = new Map<string, ReactionKey>();
     let savedSet = new Set<string>();
-    if (viewerId && postIds.length > 0) {
+    if (viewerIdStr && orderedIds.length > 0) {
       const [reactions, saves] = await Promise.all([
-        PostReactionModel.find({ post_id: { $in: postIds }, user_id: viewerId })
+        PostReactionModel.find({
+          post_id: { $in: orderedIds },
+          user_id: viewerIdStr,
+        })
           .lean()
           .exec(),
-        PostSaveModel.find({ post_id: { $in: postIds }, user_id: viewerId })
+        PostSaveModel.find({
+          post_id: { $in: orderedIds },
+          user_id: viewerIdStr,
+        })
           .lean()
           .exec(),
       ]);
@@ -142,15 +402,26 @@ export async function getFeed(req: Request, res: Response) {
       savedSet = new Set(saves.map((s: any) => s.post_id.toString()));
     }
 
-    const dtoPosts = pageItems.map((post) => {
-      const user = userMap.get(post.user_id.toString());
+    const items = orderedPageItems.map((post) => {
       const id = post._id.toString();
+      const userEntry = userMap.get(post.user_id.toString());
+      const viewerState: ViewerState = {
+        saved: savedSet.has(id),
+        reaction: reactionMap.get(id),
+      };
+      if (viewerIdStr) {
+        const watchTime = watchTimeMap.get(id);
+        viewerState.viewed = watchTime !== undefined;
+        if (watchTime !== undefined) {
+          viewerState.watchTime = watchTime;
+        }
+      }
       return {
         id,
         user: {
-          handle: user?.handle || "unknown",
-          name: user?.username || "Unknown User",
-          avatar: user?.picture_url || "https://i.pravatar.cc/100?img=1",
+          handle: userEntry?.handle || "unknown",
+          name: userEntry?.username || "Unknown User",
+          avatar: userEntry?.picture_url || "https://i.pravatar.cc/100?img=1",
         },
         caption: post.caption ?? "",
         music: post.music ?? "",
@@ -169,13 +440,11 @@ export async function getFeed(req: Request, res: Response) {
         videoSrc: post.video_src ?? "",
         visibility: post.visibility,
         allowComments: post.allow_comments,
+        orgViewIds: orgMap.get(id) ?? [],
         createdAt: post.created_at?.toISOString() ?? new Date().toISOString(),
         updatedAt: post.updated_at?.toISOString() ?? new Date().toISOString(),
-        viewer: {
-          saved: savedSet.has(id),
-          reaction: reactionMap.get(id),
-        },
-      };
+        viewer: viewerState,
+      } as PostDTO;
     });
 
     const nextCursor = hasMore
@@ -185,9 +454,9 @@ export async function getFeed(req: Request, res: Response) {
         })
       : null;
 
-    return res.json({
+    return res.status(200).json({
       algo,
-      items: dtoPosts,
+      items,
       paging: {
         nextCursor,
         hasMore,
