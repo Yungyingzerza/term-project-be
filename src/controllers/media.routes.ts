@@ -66,6 +66,21 @@ mediaRouter.post("/upload", upload.single("video"), async (req, res) => {
   await services.uploadVideo(req, res);
 });
 
+// ============================================================================
+// MOCK UPLOAD ENDPOINT (NO AUTH) - For bot/testing purposes
+// ============================================================================
+// This endpoint bypasses authentication to allow bots to upload videos
+// Usage: POST /media/upload/mock
+// Required:
+//   - video: video file (multipart/form-data)
+//   - userId: the user ID to upload as (in body)
+// Optional (same as regular upload):
+//   - caption, music, tags, visibility, allowComments, orgIds
+// ============================================================================
+mediaRouter.post("/upload/mock", upload.single("video"), async (req, res) => {
+  await services.uploadVideoMock(req, res);
+});
+
 mediaRouter.post(
   "/upload/profile",
   imageUpload.single("image"),
