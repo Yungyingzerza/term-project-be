@@ -1,7 +1,9 @@
 import axios from "axios";
+import http from "http";
+import https from "https";
 import fs from "fs";
 import path from "path";
-import FormData from "form-data";
+import NodeFormData from "form-data";
 import usersWithIds from "./usersWithIds.json";
 import captions from "./captions.json";
 
@@ -67,6 +69,9 @@ function getRandomItem<T>(array: T[]): T {
   return array[Math.floor(Math.random() * array.length)];
 }
 
+const bunGlobal = (globalThis as { Bun?: any }).Bun;
+const isBun = typeof bunGlobal !== "undefined" && typeof fetch === "function";
+
 // Upload a single video
 async function uploadVideo(
   videoPath: string,
@@ -75,12 +80,6 @@ async function uploadVideo(
   caption: string
 ): Promise<string | null> {
   try {
-    const formData = new FormData();
-    formData.append("video", fs.createReadStream(videoPath));
-    formData.append("userId", userId);
-    formData.append("caption", caption);
-    formData.append("visibility", "Public");
-
     const videoName = path.basename(videoPath);
     console.log(`📤 Uploading: ${videoName}`);
     console.log(`   User: ${username} (${userId})`);
@@ -90,10 +89,57 @@ async function uploadVideo(
       }`
     );
 
-    const response = await axios.post(UPLOAD_ENDPOINT, formData, {
-      headers: formData.getHeaders(),
+    if (isBun) {
+      // Use Bun's native fetch + FormData for better streaming support
+      const formData = new (globalThis as any).FormData();
+      const videoFile = bunGlobal.file(videoPath);
+      const fileName = path.basename(videoPath);
+
+      formData.append("video", videoFile, fileName);
+      formData.append("userId", userId);
+      formData.append("caption", caption);
+      formData.append("visibility", "Public");
+
+      const response = await fetch(UPLOAD_ENDPOINT, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorPayload = await safeParseJson(response);
+        throw new Error(
+          errorPayload?.error ||
+            errorPayload?.message ||
+            `Upload failed with status ${response.status}`
+        );
+      }
+
+      const data = await response.json();
+      const postId = data.postId;
+      console.log(`✅ Success! Post ID: ${postId}\n`);
+      return postId;
+    }
+
+    // Node.js fallback using axios + form-data
+    const formData = new NodeFormData();
+    const videoStream = fs.createReadStream(videoPath);
+    formData.append("video", videoStream, {
+      filename: path.basename(videoPath),
+    });
+    formData.append("userId", userId);
+    formData.append("caption", caption);
+    formData.append("visibility", "Public");
+
+    const axiosInstance = axios.create({
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
+      timeout: 300000,
+      httpAgent: new http.Agent({ keepAlive: false }),
+      httpsAgent: new https.Agent({ keepAlive: false }),
+    });
+
+    const response = await axiosInstance.post(UPLOAD_ENDPOINT, formData, {
+      headers: formData.getHeaders(),
     });
 
     const postId = response.data.postId;
@@ -106,10 +152,21 @@ async function uploadVideo(
       console.error(
         `   Message: ${error.response.data?.message || "Unknown error"}`
       );
+      if (error.response.data?.error) {
+        console.error(`   Error details: ${error.response.data.error}`);
+      }
     } else {
       console.error(`   Error: ${error.message}`);
     }
     console.error("");
+    return null;
+  }
+}
+
+async function safeParseJson(response: any) {
+  try {
+    return await response.clone().json();
+  } catch {
     return null;
   }
 }
@@ -214,9 +271,11 @@ async function uploadMockVideos() {
       failCount++;
     }
 
-    // Add a small delay between uploads to avoid overwhelming the server
+    // Add a delay between uploads to avoid overwhelming the server
+    // and ensure proper cleanup of previous upload
     if (i < actualUploads - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      console.log(`⏳ Waiting 3 seconds before next upload...\n`);
+      await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   }
 
