@@ -10,6 +10,7 @@ import {
   PostSaveModel,
   PostCommentModel,
   UserModel,
+  ViewModel,
 } from "../models";
 
 type UserMeta = {
@@ -23,6 +24,8 @@ type Interactions = Record<ReactionKey, number>;
 type ViewerState = {
   saved: boolean;
   reaction?: ReactionKey;
+  viewed?: boolean;
+  watchTime?: number;
 };
 
 type PostDTO = {
@@ -33,6 +36,7 @@ type PostDTO = {
   interactions: Interactions;
   comments: number;
   saves: number;
+  views: number;
   thumbnail: string;
   tags: string[];
   videoSrc: string;
@@ -159,6 +163,7 @@ export async function getFeed(req: Request, res: Response) {
         },
         comments: post.comments_count ?? 0,
         saves: post.saves_count ?? 0,
+        views: post.views_count ?? 0,
         thumbnail: post.thumbnail ?? "",
         tags: post.tags ?? [],
         videoSrc: post.video_src ?? "",
@@ -328,6 +333,7 @@ export async function getFeedByOrganizationId(req: Request, res: Response) {
         },
         comments: post.comments_count ?? 0,
         saves: post.saves_count ?? 0,
+        views: post.views_count ?? 0,
         thumbnail: post.thumbnail ?? "",
         tags: post.tags ?? [],
         videoSrc: post.video_src ?? "",
@@ -433,6 +439,7 @@ export async function getFeedByUserHandle(req: Request, res: Response) {
         },
         comments: post.comments_count ?? 0,
         saves: post.saves_count ?? 0,
+        views: post.views_count ?? 0,
         thumbnail: post.thumbnail ?? "",
         tags: post.tags ?? [],
         videoSrc: post.video_src ?? "",
@@ -542,6 +549,7 @@ export async function getPostById(req: Request, res: Response) {
       },
       comments: post.comments_count ?? 0,
       saves: post.saves_count ?? 0,
+      views: post.views_count ?? 0,
       thumbnail: post.thumbnail ?? "",
       tags: post.tags ?? [],
       videoSrc: post.video_src ?? "",
@@ -557,6 +565,83 @@ export async function getPostById(req: Request, res: Response) {
   } catch (error) {
     console.error("getPostById error", error);
     return res.status(500).json({ message: "Failed to get post" });
+  }
+}
+
+export async function recordView(req: Request, res: Response) {
+  try {
+    const reqAny = req as any;
+    const userId = reqAny.user?.id;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+    const { postId } = req.params as { postId: string };
+    const body = (req.body ?? {}) as {
+      watchTimeSeconds?: unknown;
+      watchTime?: unknown;
+    };
+    const rawWatch =
+      body.watchTimeSeconds ?? body.watchTime ?? (body as any)?.watch_time;
+
+    let watchTime = 0;
+    if (typeof rawWatch === "number" && Number.isFinite(rawWatch)) {
+      watchTime = rawWatch;
+    } else if (typeof rawWatch === "string" && rawWatch.trim() !== "") {
+      const parsed = Number(rawWatch);
+      if (!Number.isNaN(parsed) && Number.isFinite(parsed)) {
+        watchTime = parsed;
+      }
+    }
+    if (watchTime < 0) watchTime = 0;
+    const MAX_WATCH_SECONDS = 24 * 60 * 60;
+    if (watchTime > MAX_WATCH_SECONDS) watchTime = MAX_WATCH_SECONDS;
+
+    const post = await PostModel.findById(postId).exec();
+    if (!post) return res.status(404).json({ message: "Post not found" });
+
+    let created = false;
+    try {
+      await ViewModel.create({
+        post_id: postId,
+        user_id: userId,
+        watch_time: watchTime,
+      });
+      created = true;
+    } catch (err: any) {
+      if (err?.code === 11000) {
+        await ViewModel.updateOne(
+          { post_id: postId, user_id: userId },
+          { $max: { watch_time: watchTime }, $set: { updated_at: new Date() } }
+        ).exec();
+      } else {
+        throw err;
+      }
+    }
+
+    if (created) {
+      await PostModel.findByIdAndUpdate(
+        postId,
+        { $inc: { views_count: 1 } },
+        { new: false }
+      ).exec();
+    }
+
+    const [viewRecord, updatedPost] = await Promise.all([
+      ViewModel.findOne({ post_id: postId, user_id: userId }).lean().exec(),
+      PostModel.findById(postId).lean().exec(),
+    ]);
+
+    return res.status(200).json({
+      postId,
+      views: updatedPost?.views_count ?? 0,
+      viewer: {
+        viewed: true,
+        watchTime: viewRecord?.watch_time ?? watchTime,
+      },
+      wasNewView: created,
+    });
+  } catch (error) {
+    console.error("recordView error", error);
+    return res.status(500).json({ message: "Failed to record view" });
   }
 }
 

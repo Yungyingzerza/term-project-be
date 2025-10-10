@@ -38,6 +38,11 @@ feedRouter.delete("/:postId/save", async (req, res) => {
   await services.removeSave(req, res);
 });
 
+// POST /feed/:postId/views { watchTimeSeconds }
+feedRouter.post("/:postId/views", async (req, res) => {
+  await services.recordView(req, res);
+});
+
 // POST /feed/:postId/comments
 feedRouter.post("/:postId/comments", async (req, res) => {
   await services.addComment(req, res);
