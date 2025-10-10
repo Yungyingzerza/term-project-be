@@ -1160,6 +1160,47 @@ export async function getRepliesByCommentId(req: Request, res: Response) {
     const hasMore = replies.length > limit;
     const pageItems = hasMore ? replies.slice(0, limit) : replies;
 
+    const childIds = pageItems
+      .map((c) => c._id)
+      .filter(Boolean)
+      .map((id) =>
+        typeof id === "string" ? new Types.ObjectId(id) : new Types.ObjectId(id)
+      );
+
+    let repliesCountMap = new Map<string, number>();
+    if (childIds.length > 0) {
+      const nestedMatch: any = {
+        post_id: post._id,
+        parent_comment_id: { $in: childIds },
+        deleted_at: { $exists: false },
+      };
+
+      if (!isOwner) {
+        if (viewerObjectId) {
+          nestedMatch.$or = [
+            { visibility: "Public" },
+            { user_id: viewerObjectId },
+          ];
+        } else if (viewerId) {
+          nestedMatch.$or = [{ visibility: "Public" }, { user_id: viewerId }];
+        } else {
+          nestedMatch.visibility = "Public";
+        }
+      }
+
+      const nestedCounts = await PostCommentModel.aggregate<{
+        _id: Types.ObjectId;
+        count: number;
+      }>([
+        { $match: nestedMatch },
+        { $group: { _id: "$parent_comment_id", count: { $sum: 1 } } },
+      ]);
+
+      repliesCountMap = new Map(
+        nestedCounts.map((nc) => [nc._id.toString(), nc.count])
+      );
+    }
+
     const userIds = Array.from(
       new Set(pageItems.map((c) => c.user_id?.toString()).filter(Boolean))
     );
@@ -1184,6 +1225,7 @@ export async function getRepliesByCommentId(req: Request, res: Response) {
           name: u?.username || "Unknown User",
           avatar: u?.picture_url || "https://i.pravatar.cc/100?img=1",
         },
+        repliesCount: repliesCountMap.get(c._id.toString()) ?? 0,
         createdAt: c.created_at?.toISOString?.() || new Date().toISOString(),
       };
     });
