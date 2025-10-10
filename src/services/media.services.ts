@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import { Types } from "mongoose";
 import { minioClient } from "../lib/minio";
 import {
+  FollowModel,
   OrganizationMembershipModel,
   PostModel,
   PostOrgModel,
@@ -60,8 +61,10 @@ function coerceStringArray(value: unknown): string[] {
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (!trimmed) return [];
-    if ((trimmed.startsWith("[") && trimmed.endsWith("]")) ||
-        (trimmed.startsWith("\"") && trimmed.endsWith("\""))) {
+    if (
+      (trimmed.startsWith("[") && trimmed.endsWith("]")) ||
+      (trimmed.startsWith('"') && trimmed.endsWith('"'))
+    ) {
       try {
         const parsed = JSON.parse(trimmed);
         return coerceStringArray(parsed);
@@ -113,15 +116,13 @@ function resolvePublicBase(req: Request): string {
   }
 
   let prefixSource =
-    process.env.PUBLIC_BASE_PATH?.trim() || firstHeader(req, "X-Forwarded-Prefix");
+    process.env.PUBLIC_BASE_PATH?.trim() ||
+    firstHeader(req, "X-Forwarded-Prefix");
   if (!prefixSource && process.env.NODE_ENV === "production") {
     prefixSource = "chillchill";
   }
   if (prefixSource) {
-    const normalized = prefixSource
-      .split("/")
-      .filter(Boolean)
-      .join("/");
+    const normalized = prefixSource.split("/").filter(Boolean).join("/");
     if (normalized) {
       origin = `${origin}/${normalized}`;
     }
@@ -144,7 +145,10 @@ function pickImageExtension(file: Express.Multer.File): string {
   }
   const subtype = (file.mimetype || "").split("/")[1];
   if (subtype) {
-    const clean = subtype.split("+")[0]?.replace(/[^a-z0-9]/gi, "").toLowerCase();
+    const clean = subtype
+      .split("+")[0]
+      ?.replace(/[^a-z0-9]/gi, "")
+      .toLowerCase();
     if (clean) {
       return `.${clean}`;
     }
@@ -184,6 +188,110 @@ function parseRange(rangeHeader: string | undefined, size: number) {
   return { start, end } as const;
 }
 
+type LeanPost = {
+  _id: Types.ObjectId;
+  user_id: Types.ObjectId;
+  visibility: VisibilityOption;
+};
+
+async function ensureCanViewPost(
+  req: Request,
+  res: Response,
+  ownerParam: string | undefined,
+  postId: string | undefined
+): Promise<LeanPost | null> {
+  if (!postId || !Types.ObjectId.isValid(postId)) {
+    res.status(404).json({ message: "Post not found" });
+    return null;
+  }
+
+  const post = (await PostModel.findById(postId)
+    .select("_id user_id visibility")
+    .lean()
+    .exec()) as LeanPost | null;
+
+  if (!post) {
+    res.status(404).json({ message: "Post not found" });
+    return null;
+  }
+
+  const ownerId = post.user_id.toString();
+  if (ownerParam && ownerParam !== ownerId) {
+    res.status(404).json({ message: "Post not found" });
+    return null;
+  }
+
+  const reqAny = req as any;
+  const viewerRaw = reqAny.user?.id ?? null;
+  const viewerId = viewerRaw ? viewerRaw.toString() : undefined;
+
+  if (post.visibility === "Public") {
+    return post;
+  }
+
+  if (viewerId && viewerId === ownerId) {
+    return post;
+  }
+
+  if (!viewerRaw) {
+    res.status(403).json({ message: "Post is not accessible" });
+    return null;
+  }
+
+  switch (post.visibility) {
+    case "Private": {
+      res.status(403).json({ message: "Post is not accessible" });
+      return null;
+    }
+    case "Friends": {
+      const [viewerFollowsOwner, ownerFollowsViewer] = await Promise.all([
+        FollowModel.exists({
+          follower_id: viewerRaw,
+          followee_id: post.user_id,
+        }).exec(),
+        FollowModel.exists({
+          follower_id: post.user_id,
+          followee_id: viewerRaw,
+        }).exec(),
+      ]);
+
+      if (viewerFollowsOwner && ownerFollowsViewer) {
+        return post;
+      }
+
+      res.status(403).json({ message: "Post is not accessible" });
+      return null;
+    }
+    case "Organizations": {
+      const postOrgs = await PostOrgModel.find({ post_id: post._id })
+        .select("org_id")
+        .lean()
+        .exec();
+      const orgIds = postOrgs.map((entry: any) => entry.org_id);
+      if (orgIds.length === 0) {
+        res.status(403).json({ message: "Post is not accessible" });
+        return null;
+      }
+
+      const membership = await OrganizationMembershipModel.exists({
+        user_id: viewerRaw,
+        org_id: { $in: orgIds },
+      }).exec();
+
+      if (membership) {
+        return post;
+      }
+
+      res.status(403).json({ message: "Post is not accessible" });
+      return null;
+    }
+    default: {
+      res.status(403).json({ message: "Post is not accessible" });
+      return null;
+    }
+  }
+}
+
 export async function streamObject(req: Request, res: Response) {
   try {
     const bucket = "users";
@@ -194,6 +302,8 @@ export async function streamObject(req: Request, res: Response) {
     if (!bucket || !objectKeyBase) {
       return res.status(400).json({ message: "Missing bucket or object key" });
     }
+
+    if (!(await ensureCanViewPost(req, res, owner, postId))) return;
 
     const objectKeyWithExtension = `${owner}/${postId}/${objectKeyBase}.mp4`;
 
@@ -256,6 +366,7 @@ export async function photo(req: Request, res: Response) {
     if (!objectKeyBase) {
       return res.status(400).json({ message: "Missing object key" });
     }
+    if (!(await ensureCanViewPost(req, res, owner, postId))) return;
     const objectKey = `${owner}/${postId}/${objectKeyBase}.jpg`;
 
     const stat = await minioClient.statObject(bucket, objectKey);
@@ -291,7 +402,6 @@ type ProbeInfo = {
   width: number;
   height: number;
   fps: number;
-  audioBitrateK: number | null;
 };
 
 async function ffprobe(filePath: string): Promise<ProbeInfo> {
@@ -325,39 +435,7 @@ async function ffprobe(filePath: string): Promise<ProbeInfo> {
           ? Number(fpsParts[0]) / Number(fpsParts[1])
           : Number(fpsStr);
 
-      // Probe audio bitrate (kbps)
-      const aargs = [
-        "-v",
-        "error",
-        "-select_streams",
-        "a:0",
-        "-show_entries",
-        "stream=bit_rate",
-        "-of",
-        "default=nw=1:nk=1",
-        filePath,
-      ];
-      const aproc = spawn("ffprobe", aargs);
-      let aout = "";
-      let aerr = "";
-      aproc.stdout.on("data", (d) => (aout += d.toString()));
-      aproc.stderr.on("data", (d) => (aerr += d.toString()));
-      aproc.on("close", (acode) => {
-        if (acode !== 0) {
-          // No audio stream fallback
-          return resolve({
-            width,
-            height,
-            fps: Math.round(fps) || 30,
-            audioBitrateK: null,
-          });
-        }
-        const bit = parseInt(aout.trim(), 10);
-        const audioBitrateK = Number.isFinite(bit)
-          ? Math.round(bit / 1000)
-          : null;
-        resolve({ width, height, fps: Math.round(fps) || 30, audioBitrateK });
-      });
+      resolve({ width, height, fps: Math.round(fps) || 30 });
     });
   });
 }
@@ -365,9 +443,9 @@ async function ffprobe(filePath: string): Promise<ProbeInfo> {
 function runFfmpeg(
   input: string,
   output: string,
-  opts: { height: number; fps: number; audioBitrateK: number | null }
+  opts: { height: number; fps: number }
 ) {
-  const { height, fps, audioBitrateK } = opts;
+  const { height, fps } = opts;
   const args = [
     "-y",
     "-i",
@@ -388,7 +466,8 @@ function runFfmpeg(
     "5.2",
     "-x264-params",
     "keyint=240:min-keyint=240:scenecut=0:vbv-maxrate=24000:vbv-bufsize=48000",
-    ...(audioBitrateK ? ["-c:a", "aac", "-b:a", `${audioBitrateK}k`] : ["-an"]),
+    "-c:a",
+    "copy",
     "-movflags",
     "+faststart",
     output,
@@ -470,14 +549,34 @@ export async function uploadVideo(req: Request, res: Response) {
         : allowCommentsRaw ?? true;
 
     const requestedVisibility = normalizeVisibility(body?.visibility);
+    const wantsOrgOnlyVisibility = requestedVisibility === "Organizations";
     const orgIdsRaw = body?.orgIds ?? body?.org_id ?? body?.org_ids;
-    const orgIdStrings = Array.from(
+    let orgIdStrings = Array.from(
       new Set(
         coerceStringArray(orgIdsRaw)
           .map((id) => id.trim())
           .filter(Boolean)
       )
     );
+
+    let membershipDocs:
+      | { org_id: Types.ObjectId | string }[]
+      | null
+      | undefined = null;
+
+    if (wantsOrgOnlyVisibility && orgIdStrings.length === 0) {
+      membershipDocs = await OrganizationMembershipModel.find({
+        user_id: reqAny.user.id,
+      })
+        .select("org_id")
+        .lean()
+        .exec();
+      orgIdStrings = Array.from(
+        new Set(
+          (membershipDocs || []).map((entry: any) => String(entry.org_id))
+        )
+      );
+    }
 
     const invalidOrgIds = orgIdStrings.filter(
       (id) => !Types.ObjectId.isValid(id)
@@ -491,13 +590,15 @@ export async function uploadVideo(req: Request, res: Response) {
 
     let orgObjectIds: Types.ObjectId[] = [];
     if (orgIdStrings.length > 0) {
-      const memberships = await OrganizationMembershipModel.find({
-        user_id: reqAny.user.id,
-        org_id: { $in: orgIdStrings },
-      })
-        .select("org_id")
-        .lean()
-        .exec();
+      const memberships =
+        membershipDocs ??
+        (await OrganizationMembershipModel.find({
+          user_id: reqAny.user.id,
+          org_id: { $in: orgIdStrings },
+        })
+          .select("org_id")
+          .lean()
+          .exec());
 
       const allowed = new Set(memberships.map((m: any) => String(m.org_id)));
       const unauthorized = orgIdStrings.filter((id) => !allowed.has(id));
@@ -510,11 +611,13 @@ export async function uploadVideo(req: Request, res: Response) {
       orgObjectIds = orgIdStrings.map((id) => new Types.ObjectId(id));
     }
 
-    const restrictToOrg =
-      requestedVisibility === "Organizations" || orgObjectIds.length > 0;
-    if (restrictToOrg && orgObjectIds.length === 0) {
+    if (wantsOrgOnlyVisibility && orgObjectIds.length === 0) {
+      const message =
+        orgIdStrings.length === 0
+          ? "You must belong to at least one organization to use organization visibility"
+          : "Organization visibility requires at least one org id";
       return res.status(400).json({
-        message: "Organization visibility requires at least one org id",
+        message,
       });
     }
 
@@ -544,7 +647,6 @@ export async function uploadVideo(req: Request, res: Response) {
     await runFfmpeg(file.path, outPath, {
       height: info.height || 1080,
       fps: info.fps || 30,
-      audioBitrateK: info.audioBitrateK ?? 128,
     });
 
     // 4) Upload to MinIO
@@ -579,7 +681,9 @@ export async function uploadVideo(req: Request, res: Response) {
     const thumbnail = buildPublicUrl(req, `media/photo/${basePath}`);
     post.video_src = video_src;
     post.thumbnail = thumbnail;
-    post.visibility = restrictToOrg ? "Organizations" : requestedVisibility;
+    post.visibility = wantsOrgOnlyVisibility
+      ? "Organizations"
+      : requestedVisibility;
     post.tags = tags;
     post.allow_comments = allowComments;
     await post.save();
@@ -614,6 +718,216 @@ export async function uploadVideo(req: Request, res: Response) {
   }
 }
 
+export async function uploadVideoMock(req: Request, res: Response) {
+  let inPath: string | undefined;
+  let outPath: string | undefined;
+  let thumbPath: string | undefined;
+  try {
+    const reqAny = req as any;
+    const file = reqAny.file as Express.Multer.File | undefined;
+    if (!file) return res.status(400).json({ message: "Missing file 'video'" });
+    inPath = file.path;
+
+    const body = req.body as any;
+
+    // Get userId from body for mocking
+    const userId = body?.userId || body?.user_id;
+    if (!userId) {
+      return res
+        .status(400)
+        .json({ message: "Missing userId in request body" });
+    }
+
+    // Verify user exists
+    const userExists = await UserModel.exists({ _id: userId });
+    if (!userExists) {
+      return res.status(400).json({ message: "User not found" });
+    }
+
+    const caption =
+      typeof body?.caption === "string"
+        ? body.caption
+        : body?.caption?.toString?.() ?? "";
+    const music =
+      typeof body?.music === "string"
+        ? body.music
+        : body?.music?.toString?.() ?? "";
+    const allowCommentsRaw = body?.allowComments;
+    const allowComments =
+      typeof allowCommentsRaw === "string"
+        ? allowCommentsRaw === "true"
+        : allowCommentsRaw ?? true;
+
+    const requestedVisibility = normalizeVisibility(body?.visibility);
+    const wantsOrgOnlyVisibility = requestedVisibility === "Organizations";
+    const orgIdsRaw = body?.orgIds ?? body?.org_id ?? body?.org_ids;
+    let orgIdStrings = Array.from(
+      new Set(
+        coerceStringArray(orgIdsRaw)
+          .map((id) => id.trim())
+          .filter(Boolean)
+      )
+    );
+
+    let membershipDocs:
+      | { org_id: Types.ObjectId | string }[]
+      | null
+      | undefined = null;
+
+    if (wantsOrgOnlyVisibility && orgIdStrings.length === 0) {
+      membershipDocs = await OrganizationMembershipModel.find({
+        user_id: userId,
+      })
+        .select("org_id")
+        .lean()
+        .exec();
+      orgIdStrings = Array.from(
+        new Set(
+          (membershipDocs || []).map((entry: any) => String(entry.org_id))
+        )
+      );
+    }
+
+    const invalidOrgIds = orgIdStrings.filter(
+      (id) => !Types.ObjectId.isValid(id)
+    );
+    if (invalidOrgIds.length > 0) {
+      return res.status(400).json({
+        message: "Invalid organization id(s)",
+        orgIds: invalidOrgIds,
+      });
+    }
+
+    let orgObjectIds: Types.ObjectId[] = [];
+    if (orgIdStrings.length > 0) {
+      const memberships =
+        membershipDocs ??
+        (await OrganizationMembershipModel.find({
+          user_id: userId,
+          org_id: { $in: orgIdStrings },
+        })
+          .select("org_id")
+          .lean()
+          .exec());
+
+      const allowed = new Set(memberships.map((m: any) => String(m.org_id)));
+      const unauthorized = orgIdStrings.filter((id) => !allowed.has(id));
+      if (unauthorized.length > 0) {
+        return res.status(403).json({
+          message: "User is not a member of the requested organization(s)",
+          orgIds: unauthorized,
+        });
+      }
+      orgObjectIds = orgIdStrings.map((id) => new Types.ObjectId(id));
+    }
+
+    if (wantsOrgOnlyVisibility && orgObjectIds.length === 0) {
+      const message =
+        orgIdStrings.length === 0
+          ? "User must belong to at least one organization to use organization visibility"
+          : "Organization visibility requires at least one org id";
+      return res.status(400).json({
+        message,
+      });
+    }
+
+    const tagsFromBody = coerceStringArray(body?.tags).map((tag) =>
+      tag.toLowerCase()
+    );
+    const tagsFromCaption = extractHashtags(caption);
+    const tags = Array.from(new Set([...tagsFromBody, ...tagsFromCaption]));
+
+    // 1) Create a Post first to get postId
+    const post = await PostModel.create({
+      user_id: userId,
+      caption,
+      music,
+      tags,
+      video_src: "temp",
+      visibility: "Private",
+      allow_comments: allowComments,
+    });
+    const postId = String(post._id);
+
+    // 2) Probe original
+    const info = await ffprobe(file.path);
+    outPath = path.join(path.dirname(file.path), `${postId}.mp4`);
+
+    // 3) Transcode with requested parameters based on original
+    await runFfmpeg(file.path, outPath, {
+      height: info.height || 1080,
+      fps: info.fps || 30,
+    });
+
+    // 4) Upload to MinIO
+    const bucket = process.env.MINIO_BUCKET || "users";
+    await ensureBucket(bucket);
+    const basePath = `${userId}/${postId}/${postId}`;
+    const objectName = `${basePath}.mp4`;
+    const meta = { "Content-Type": "video/mp4" } as any;
+    await minioClient.fPutObject(bucket, objectName, outPath, meta);
+
+    // 5) Generate and upload thumbnail (JPEG from near first frame)
+    const thumbHeight = Math.min(720, info.height || 720);
+    thumbPath = path.join(path.dirname(outPath), `${postId}.jpg`);
+    try {
+      await extractThumbnail(outPath, thumbPath, {
+        height: thumbHeight,
+        ss: 0.5,
+      });
+      const thumbMeta = { "Content-Type": "image/jpeg" } as any;
+      await minioClient.fPutObject(
+        bucket,
+        `${basePath}.jpg`,
+        thumbPath,
+        thumbMeta
+      );
+    } catch (e) {
+      console.warn("thumbnail generation/upload failed:", e);
+    }
+
+    // 6) Update Post with video_src and thumbnail
+    const video_src = buildPublicUrl(req, `media/${basePath}`);
+    const thumbnail = buildPublicUrl(req, `media/photo/${basePath}`);
+    post.video_src = video_src;
+    post.thumbnail = thumbnail;
+    post.visibility = wantsOrgOnlyVisibility
+      ? "Organizations"
+      : requestedVisibility;
+    post.tags = tags;
+    post.allow_comments = allowComments;
+    await post.save();
+
+    if (orgObjectIds.length > 0) {
+      const payload = orgObjectIds.map((orgId) => ({
+        post_id: post._id,
+        org_id: orgId,
+      }));
+      await PostOrgModel.insertMany(payload, { ordered: false });
+    }
+
+    // Cleanup is handled in finally
+
+    return res.status(201).json({
+      postId,
+      post,
+      orgViewIds: orgIdStrings,
+      tags,
+    });
+  } catch (err: any) {
+    console.error("uploadVideoMock error", err);
+    return res.status(500).json({
+      message: "Failed to upload",
+      error: err?.message || String(err),
+    });
+  } finally {
+    // Always attempt to clean up temp files
+    await safeUnlink(inPath, "upload temp");
+    await safeUnlink(outPath, "transcoded temp");
+    await safeUnlink(thumbPath, "thumbnail temp");
+  }
+}
+
 export async function uploadProfileImage(req: Request, res: Response) {
   let tempPath: string | undefined;
   try {
@@ -622,8 +936,7 @@ export async function uploadProfileImage(req: Request, res: Response) {
       return res.status(401).json({ message: "Unauthorized" });
 
     const file = reqAny.file as Express.Multer.File | undefined;
-    if (!file)
-      return res.status(400).json({ message: "Missing file 'image'" });
+    if (!file) return res.status(400).json({ message: "Missing file 'image'" });
 
     tempPath = file.path;
     const userId = String(reqAny.user.id);

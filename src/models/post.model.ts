@@ -13,6 +13,7 @@ const postSchema = new Schema(
     angry_count: { type: Number, default: 0 },
     comments_count: { type: Number, default: 0 },
     saves_count: { type: Number, default: 0 },
+    views_count: { type: Number, default: 0 },
     thumbnail: { type: String },
     tags: { type: [Schema.Types.Mixed], default: [] },
     video_src: { type: String, required: true },
