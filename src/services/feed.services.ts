@@ -56,10 +56,33 @@ function parseLimit(raw: unknown, def = 5, min = 1, max = 10) {
 }
 
 //BELOW THIS IS TEST
-type CursorToken = { createdAt: string; id: string };
+type CursorToken = {
+  createdAt: string;
+  id: string;
+  issuedAt?: string;
+  excludeIds?: string[];
+};
 
 function encodeCursor(c: CursorToken): string {
-  return Buffer.from(JSON.stringify(c), "utf8").toString("base64");
+  const issuedAt = c.issuedAt ?? new Date().toISOString();
+  const payload: CursorToken = {
+    createdAt: c.createdAt,
+    id: c.id,
+    issuedAt,
+  };
+  if (Array.isArray(c.excludeIds) && c.excludeIds.length > 0) {
+    const cleaned = c.excludeIds
+      .filter(
+        (entry): entry is string =>
+          typeof entry === "string" && Types.ObjectId.isValid(entry)
+      )
+      .map((entry) => entry.toString());
+    const unique = Array.from(new Set(cleaned)).slice(0, CURSOR_EXCLUDE_LIMIT);
+    if (unique.length > 0) {
+      payload.excludeIds = unique;
+    }
+  }
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
 }
 
 function decodeCursor(raw?: string | null): CursorToken | null {
@@ -70,6 +93,19 @@ function decodeCursor(raw?: string | null): CursorToken | null {
       typeof parsed?.createdAt === "string" &&
       typeof parsed?.id === "string"
     ) {
+      if (parsed.issuedAt && typeof parsed.issuedAt !== "string") {
+        delete parsed.issuedAt;
+      }
+      if (Array.isArray(parsed.excludeIds)) {
+        parsed.excludeIds = parsed.excludeIds
+          .filter(
+            (entry: unknown): entry is string =>
+              typeof entry === "string" && Types.ObjectId.isValid(entry)
+          )
+          .slice(0, CURSOR_EXCLUDE_LIMIT);
+      } else {
+        delete parsed.excludeIds;
+      }
       return parsed as CursorToken;
     }
   } catch {}
@@ -80,15 +116,28 @@ function decodeCursor(raw?: string | null): CursorToken | null {
 function buildCursorFilter(cursor: CursorToken | null) {
   if (!cursor) return {};
   const createdAt = new Date(cursor.createdAt);
-  const id = cursor.id;
-  return {
-    $or: [
-      { created_at: { $lt: createdAt } },
-      { created_at: createdAt, _id: { $lt: id } },
-    ],
-  };
+  const objectId = Types.ObjectId.isValid(cursor.id)
+    ? new Types.ObjectId(cursor.id)
+    : null;
+  if (objectId) {
+    return {
+      $or: [
+        { created_at: { $lt: createdAt } },
+        { created_at: createdAt, _id: { $lt: objectId } },
+      ],
+    };
+  }
+  return { created_at: { $lt: createdAt } };
 }
 
+function buildNewerThanCursorFilter(cursor: CursorToken | null) {
+  if (!cursor?.issuedAt) return {};
+  const issuedAt = new Date(cursor.issuedAt);
+  if (Number.isNaN(issuedAt.getTime())) return {};
+  return { created_at: { $gt: issuedAt } };
+}
+
+const CURSOR_EXCLUDE_LIMIT = 100; // cap stored cursor exclusions to keep tokens small
 const WATCH_HISTORY_EXCLUSION_LIMIT = 750; // cap to keep $nin manageable while hiding recent watches
 const HOUR_IN_MS = 60 * 60 * 1000;
 
@@ -151,7 +200,7 @@ export async function getFeed(req: Request, res: Response) {
     let friendIds: Types.ObjectId[] = [];
     let accessibleOrgPostIds: Types.ObjectId[] = [];
     const watchTimeMap = new Map<string, number>();
-    let watchedObjectIds: Types.ObjectId[] = [];
+    const watchedIdStrings = new Set<string>();
 
     if (viewerObjectId) {
       const [followingDocs, followerDocs, membershipDocs, viewDocs] =
@@ -188,17 +237,14 @@ export async function getFeed(req: Request, res: Response) {
         followerSet.has(followee.toString())
       );
 
-      const seenWatched = new Set<string>();
-      watchedObjectIds = [];
       for (const view of viewDocs) {
         const idStr = view.post_id?.toString?.();
-        if (!idStr || seenWatched.has(idStr)) continue;
-        seenWatched.add(idStr);
+        if (!idStr || watchedIdStrings.has(idStr)) continue;
+        watchedIdStrings.add(idStr);
         watchTimeMap.set(
           idStr,
           typeof view.watch_time === "number" ? view.watch_time : 0
         );
-        watchedObjectIds.push(new Types.ObjectId(idStr));
       }
 
       if (membershipDocs.length > 0) {
@@ -218,6 +264,24 @@ export async function getFeed(req: Request, res: Response) {
         }
       }
     }
+
+    const cursorExcludeIds = Array.isArray(cursor?.excludeIds)
+      ? cursor.excludeIds.filter(
+          (id): id is string =>
+            typeof id === "string" && Types.ObjectId.isValid(id)
+        )
+      : [];
+
+    const exclusionIdStrings = new Set<string>();
+    for (const id of watchedIdStrings) {
+      exclusionIdStrings.add(id);
+    }
+    for (const id of cursorExcludeIds) {
+      exclusionIdStrings.add(id);
+    }
+    const exclusionObjectIds = Array.from(exclusionIdStrings, (id) =>
+      new Types.ObjectId(id)
+    );
 
     const friendSet = new Set(friendIds.map((id) => id.toString()));
     const followingOnlyIds = followeeIds.filter(
@@ -302,24 +366,54 @@ export async function getFeed(req: Request, res: Response) {
       filterParts.push(rangeFilter);
     }
 
-    if (watchedObjectIds.length > 0) {
-      filterParts.push({ _id: { $nin: watchedObjectIds } });
+    if (exclusionObjectIds.length > 0) {
+      filterParts.push({ _id: { $nin: exclusionObjectIds } });
     }
 
     const filter =
       filterParts.length === 1 ? filterParts[0] : { $and: filterParts };
 
     const sort = { created_at: -1 as const, _id: -1 as const };
+    let freshPosts: any[] = [];
+    if (cursor) {
+      const newerFilter = buildNewerThanCursorFilter(cursor);
+      if (Object.keys(newerFilter).length > 0) {
+        const freshParts: Record<string, unknown>[] = [
+          visibilityFilter,
+          newerFilter,
+        ];
+        if (exclusionObjectIds.length > 0) {
+          freshParts.push({ _id: { $nin: exclusionObjectIds } });
+        }
+        const freshFilter =
+          freshParts.length === 1 ? freshParts[0] : { $and: freshParts };
+        freshPosts = await PostModel.find(freshFilter)
+          .sort(sort)
+          .limit(limit + 1)
+          .exec();
+      }
+    }
 
     const posts = await PostModel.find(filter)
       .sort(sort)
       .limit(limit + 1)
       .exec();
 
-    const hasMore = posts.length > limit;
-    const pageItems = hasMore ? posts.slice(0, limit) : posts;
+    const hasMoreOlder = posts.length > limit;
+    const pageItems = hasMoreOlder ? posts.slice(0, limit) : posts;
 
-    if (pageItems.length === 0) {
+    const combinedCandidates: typeof pageItems = [];
+    const seenIds = new Set<string>();
+    for (const post of [...freshPosts, ...pageItems]) {
+      const id = post._id.toString();
+      if (exclusionIdStrings.has(id)) continue;
+      if (!seenIds.has(id)) {
+        seenIds.add(id);
+        combinedCandidates.push(post);
+      }
+    }
+
+    if (combinedCandidates.length === 0) {
       return res.status(200).json({
         algo,
         items: [],
@@ -327,30 +421,9 @@ export async function getFeed(req: Request, res: Response) {
       });
     }
 
-    const pagePostIds = pageItems.map((p) => p._id);
-    const orgMap = new Map<string, string[]>();
-    if (pagePostIds.length > 0) {
-      const orgAssociations = await PostOrgModel.find({
-        post_id: { $in: pagePostIds },
-      })
-        .select("post_id org_id")
-        .lean()
-        .exec();
-      for (const assoc of orgAssociations) {
-        const key = assoc.post_id.toString();
-        const orgIdStr = assoc.org_id.toString();
-        const existing = orgMap.get(key);
-        if (existing) {
-          if (!existing.includes(orgIdStr)) existing.push(orgIdStr);
-        } else {
-          orgMap.set(key, [orgIdStr]);
-        }
-      }
-    }
-
     const nowMs = Date.now();
     const jitterSeed = Math.random().toString(36).slice(2);
-    const orderedPageItems = pageItems
+    const orderedPosts = combinedCandidates
       .map((post) => ({
         post,
         score: computePostScore(post, nowMs, jitterSeed),
@@ -370,27 +443,61 @@ export async function getFeed(req: Request, res: Response) {
       })
       .map((entry) => entry.post);
 
+    const responsePosts = orderedPosts.slice(0, limit);
+
+    if (responsePosts.length === 0) {
+      return res.status(200).json({
+        algo,
+        items: [],
+        paging: { hasMore: false, nextCursor: null },
+      });
+    }
+
+    const moreAvailable =
+      hasMoreOlder || orderedPosts.length > responsePosts.length;
+
+    const responseIds = responsePosts.map((p) => p._id);
+    const orgMap = new Map<string, string[]>();
+    if (responseIds.length > 0) {
+      const orgAssociations = await PostOrgModel.find({
+        post_id: { $in: responseIds },
+      })
+        .select("post_id org_id")
+        .lean()
+        .exec();
+      for (const assoc of orgAssociations) {
+        const key = assoc.post_id.toString();
+        const orgIdStr = assoc.org_id.toString();
+        const existing = orgMap.get(key);
+        if (existing) {
+          if (!existing.includes(orgIdStr)) existing.push(orgIdStr);
+        } else {
+          orgMap.set(key, [orgIdStr]);
+        }
+      }
+    }
+
     const uniqueUserIds = Array.from(
-      new Set(orderedPageItems.map((p) => p.user_id.toString()))
+      new Set(responsePosts.map((p) => p.user_id.toString()))
     ).map((id) => new Types.ObjectId(id));
     const users = await UserModel.find({ _id: { $in: uniqueUserIds } })
       .lean()
       .exec();
     const userMap = new Map(users.map((u) => [u._id.toString(), u]));
 
-    const orderedIds = orderedPageItems.map((p) => p._id.toString());
+    const responseIdStrings = responsePosts.map((p) => p._id.toString());
     let reactionMap = new Map<string, ReactionKey>();
     let savedSet = new Set<string>();
-    if (viewerIdStr && orderedIds.length > 0) {
+    if (viewerIdStr && responseIdStrings.length > 0) {
       const [reactions, saves] = await Promise.all([
         PostReactionModel.find({
-          post_id: { $in: orderedIds },
+          post_id: { $in: responseIdStrings },
           user_id: viewerIdStr,
         })
           .lean()
           .exec(),
         PostSaveModel.find({
-          post_id: { $in: orderedIds },
+          post_id: { $in: responseIdStrings },
           user_id: viewerIdStr,
         })
           .lean()
@@ -402,7 +509,7 @@ export async function getFeed(req: Request, res: Response) {
       savedSet = new Set(saves.map((s: any) => s.post_id.toString()));
     }
 
-    const items = orderedPageItems.map((post) => {
+    const items = responsePosts.map((post) => {
       const id = post._id.toString();
       const userEntry = userMap.get(post.user_id.toString());
       const viewerState: ViewerState = {
@@ -447,19 +554,36 @@ export async function getFeed(req: Request, res: Response) {
       } as PostDTO;
     });
 
-    const nextCursor = hasMore
-      ? encodeCursor({
-          createdAt: pageItems[pageItems.length - 1].created_at.toISOString(),
-          id: pageItems[pageItems.length - 1]._id.toString(),
-        })
-      : null;
+    let nextCursor: string | null = null;
+    if (moreAvailable && responsePosts.length > 0) {
+      const tail = responsePosts[responsePosts.length - 1];
+      const createdAtRaw =
+        tail.created_at instanceof Date
+          ? tail.created_at
+          : tail.created_at
+          ? new Date(tail.created_at)
+          : new Date();
+      const createdAt = Number.isNaN(createdAtRaw.getTime())
+        ? new Date()
+        : createdAtRaw;
+      const accumulatedExclude = Array.from(
+        new Set([...cursorExcludeIds, ...responseIdStrings])
+      );
+      const nextIssuedAt = cursor?.issuedAt ?? new Date().toISOString();
+      nextCursor = encodeCursor({
+        createdAt: createdAt.toISOString(),
+        id: tail._id.toString(),
+        issuedAt: nextIssuedAt,
+        excludeIds: accumulatedExclude,
+      });
+    }
 
     return res.status(200).json({
       algo,
       items,
       paging: {
         nextCursor,
-        hasMore,
+        hasMore: moreAvailable,
       },
     });
   } catch (error) {
