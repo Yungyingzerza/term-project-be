@@ -48,6 +48,16 @@ feedRouter.post("/:postId/comments", async (req, res) => {
   await services.addComment(req, res);
 });
 
+// POST /feed/:postId/comments/:commentId/replies
+feedRouter.post("/:postId/comments/:commentId/replies", async (req, res) => {
+  await services.addReply(req, res);
+});
+
+// GET /feed/:postId/comments/:commentId/replies?limit&cursor
+feedRouter.get("/:postId/comments/:commentId/replies", async (req, res) => {
+  await services.getRepliesByCommentId(req, res);
+});
+
 // GET /feed/:postId
 feedRouter.get("/:postId", async (req, res) => {
   await services.getPostById(req, res);

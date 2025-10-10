@@ -933,6 +933,21 @@ export async function addComment(req: Request, res: Response) {
   }
 }
 
+export async function addReply(req: Request, res: Response) {
+  const { commentId } = req.params as { commentId?: string };
+  if (!commentId) {
+    return res.status(400).json({ message: "Parent comment id is required" });
+  }
+
+  const body =
+    req.body && typeof req.body === "object"
+      ? (req.body as Record<string, unknown>)
+      : {};
+
+  (req as any).body = { ...body, parentCommentId: commentId };
+  return addComment(req, res);
+}
+
 export async function getCommentsByPostId(req: Request, res: Response) {
   try {
     const { postId } = req.params as { postId: string };
@@ -944,6 +959,10 @@ export async function getCommentsByPostId(req: Request, res: Response) {
     if (!post) return res.status(404).json({ message: "Post not found" });
 
     const viewerId = (req as any)?.user?.id?.toString();
+    const viewerObjectId =
+      viewerId && Types.ObjectId.isValid(viewerId)
+        ? new Types.ObjectId(viewerId)
+        : null;
     const isOwner = viewerId && viewerId === post.user_id?.toString();
 
     // Build access conditions
@@ -951,11 +970,18 @@ export async function getCommentsByPostId(req: Request, res: Response) {
       { post_id: postId },
       buildCursorFilter(cursor),
       { deleted_at: { $exists: false } },
+      {
+        $or: [{ parent_comment_id: { $exists: false } }, { parent_comment_id: null }],
+      },
     ];
 
     // If viewer is not the post owner, restrict to Public or viewer's own comments
     if (!isOwner) {
-      if (viewerId) {
+      if (viewerObjectId) {
+        baseConditions.push({
+          $or: [{ visibility: "Public" }, { user_id: viewerObjectId }],
+        });
+      } else if (viewerId) {
         baseConditions.push({
           $or: [{ visibility: "Public" }, { user_id: viewerId }],
         });
@@ -975,6 +1001,164 @@ export async function getCommentsByPostId(req: Request, res: Response) {
 
     const hasMore = comments.length > limit;
     const pageItems = hasMore ? comments.slice(0, limit) : comments;
+
+    const parentIds = pageItems
+      .map((c) => c._id)
+      .filter(Boolean)
+      .map((id) =>
+        typeof id === "string" ? new Types.ObjectId(id) : new Types.ObjectId(id)
+      );
+    let repliesCountMap = new Map<string, number>();
+
+    if (parentIds.length > 0) {
+      const replyMatch: any = {
+        post_id: post._id,
+        parent_comment_id: { $in: parentIds },
+        deleted_at: { $exists: false },
+      };
+
+      if (!isOwner) {
+        if (viewerObjectId) {
+          replyMatch.$or = [
+            { visibility: "Public" },
+            { user_id: viewerObjectId },
+          ];
+        } else if (viewerId) {
+          replyMatch.$or = [{ visibility: "Public" }, { user_id: viewerId }];
+        } else {
+          replyMatch.visibility = "Public";
+        }
+      }
+
+      const replyCounts = await PostCommentModel.aggregate<{
+        _id: Types.ObjectId;
+        count: number;
+      }>([
+        { $match: replyMatch },
+        { $group: { _id: "$parent_comment_id", count: { $sum: 1 } } },
+      ]);
+
+      repliesCountMap = new Map(
+        replyCounts.map((rc) => [rc._id.toString(), rc.count])
+      );
+    }
+
+    const userIds = Array.from(
+      new Set(pageItems.map((c) => c.user_id?.toString()).filter(Boolean))
+    );
+    const users = await UserModel.find({ _id: { $in: userIds } })
+      .lean()
+      .exec();
+    const userMap = new Map(users.map((u) => [u._id.toString(), u]));
+
+    const items = pageItems.map((c) => {
+      const u = userMap.get(c.user_id?.toString() || "");
+      return {
+        id: c._id.toString(),
+        postId,
+        text: c.text,
+        visibility: c.visibility,
+        parentCommentId: c.parent_comment_id
+          ? c.parent_comment_id.toString()
+          : null,
+        user: {
+          id: c.user_id?.toString() || "",
+          handle: u?.handle || "unknown",
+          name: u?.username || "Unknown User",
+          avatar: u?.picture_url || "https://i.pravatar.cc/100?img=1",
+        },
+        repliesCount: repliesCountMap.get(c._id.toString()) ?? 0,
+        createdAt: c.created_at?.toISOString?.() || new Date().toISOString(),
+      };
+    });
+
+    const nextCursor = hasMore
+      ? encodeCursor({
+          createdAt: pageItems[pageItems.length - 1].created_at.toISOString(),
+          id: pageItems[pageItems.length - 1]._id.toString(),
+        })
+      : null;
+
+    return res.status(200).json({
+      items,
+      paging: { hasMore, nextCursor },
+    });
+  } catch (error) {
+    console.error("getCommentsByPostId error", error);
+    return res.status(500).json({ message: "Failed to get comments" });
+  }
+}
+
+export async function getRepliesByCommentId(req: Request, res: Response) {
+  try {
+    const { postId, commentId } = req.params as {
+      postId: string;
+      commentId: string;
+    };
+    const limit = parseLimit(req.query.limit, 10, 1, 50);
+    const cursor = decodeCursor(req.query.cursor as string | undefined);
+
+    const [post, parent] = await Promise.all([
+      PostModel.findById(postId).lean().exec(),
+      PostCommentModel.findById(commentId).lean().exec(),
+    ]);
+
+    if (!post) return res.status(404).json({ message: "Post not found" });
+    if (!parent || parent.deleted_at) {
+      return res.status(404).json({ message: "Comment not found" });
+    }
+    if (String(parent.post_id) !== String(post._id)) {
+      return res
+        .status(400)
+        .json({ message: "Comment does not belong to this post" });
+    }
+
+    const viewerId = (req as any)?.user?.id?.toString();
+    const viewerObjectId =
+      viewerId && Types.ObjectId.isValid(viewerId)
+        ? new Types.ObjectId(viewerId)
+        : null;
+    const isOwner = viewerId && viewerId === post.user_id?.toString();
+    const isParentAuthor =
+      viewerId && viewerId === parent.user_id?.toString();
+
+    if (!isOwner && parent.visibility === "OwnerOnly" && !isParentAuthor) {
+      return res
+        .status(403)
+        .json({ message: "You do not have access to this comment" });
+    }
+
+    const baseConditions: any[] = [
+      { post_id: post._id },
+      { parent_comment_id: parent._id },
+      buildCursorFilter(cursor),
+      { deleted_at: { $exists: false } },
+    ];
+
+    if (!isOwner) {
+      if (viewerObjectId) {
+        baseConditions.push({
+          $or: [{ visibility: "Public" }, { user_id: viewerObjectId }],
+        });
+      } else if (viewerId) {
+        baseConditions.push({
+          $or: [{ visibility: "Public" }, { user_id: viewerId }],
+        });
+      } else {
+        baseConditions.push({ visibility: "Public" });
+      }
+    }
+
+    const filter: any = { $and: baseConditions };
+    const sort = { created_at: -1 as const, _id: -1 as const };
+    const replies = await PostCommentModel.find(filter)
+      .sort(sort)
+      .limit(limit + 1)
+      .lean()
+      .exec();
+
+    const hasMore = replies.length > limit;
+    const pageItems = hasMore ? replies.slice(0, limit) : replies;
 
     const userIds = Array.from(
       new Set(pageItems.map((c) => c.user_id?.toString()).filter(Boolean))
@@ -1016,7 +1200,7 @@ export async function getCommentsByPostId(req: Request, res: Response) {
       paging: { hasMore, nextCursor },
     });
   } catch (error) {
-    console.error("getCommentsByPostId error", error);
-    return res.status(500).json({ message: "Failed to get comments" });
+    console.error("getRepliesByCommentId error", error);
+    return res.status(500).json({ message: "Failed to get replies" });
   }
 }
