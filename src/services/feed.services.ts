@@ -610,15 +610,6 @@ export async function getFeedByOrganizationId(req: Request, res: Response) {
       return res.status(404).json({ message: "Organization not found" });
     }
 
-    const viewerId = (req as any)?.user?.id?.toString();
-    const membership = viewerId
-      ? await OrganizationMembershipModel.exists({
-          org_id: orgObjectId,
-          user_id: viewerId,
-        }).exec()
-      : null;
-    const isMember = Boolean(membership);
-
     const postOrgLinks = await PostOrgModel.find({ org_id: orgObjectId })
       .select("post_id")
       .lean()
@@ -629,72 +620,240 @@ export async function getFeedByOrganizationId(req: Request, res: Response) {
         .json({ items: [], paging: { hasMore: false, nextCursor: null } });
     }
 
-    const postIds = postOrgLinks.map((link: any) => link.post_id);
-    const visibilityFilter = isMember
-      ? { $in: ["Public", "Organizations"] as Visibility[] }
-      : "Public";
+    const postIdStrings = postOrgLinks
+      .map((link: any) => link.post_id?.toString?.())
+      .filter(
+        (id): id is string =>
+          typeof id === "string" && Types.ObjectId.isValid(id)
+      );
 
-    const baseFilter: Record<string, unknown> = {
-      _id: { $in: postIds },
-      visibility: visibilityFilter,
-    };
+    if (postIdStrings.length === 0) {
+      return res
+        .status(200)
+        .json({ items: [], paging: { hasMore: false, nextCursor: null } });
+    }
+
+    const uniquePostIdStrings = Array.from(new Set(postIdStrings));
+    const postIds = uniquePostIdStrings.map((id) => new Types.ObjectId(id));
+
+    const reqAny = req as any;
+    const viewerIdStr = reqAny?.user?.id?.toString?.();
+    const viewerObjectId = viewerIdStr ? new Types.ObjectId(viewerIdStr) : null;
+
+    const watchTimeMap = new Map<string, number>();
+    const watchedIdStrings = new Set<string>();
+    let membershipDoc: unknown = null;
+
+    if (viewerObjectId) {
+      const [membership, viewDocs] = await Promise.all([
+        OrganizationMembershipModel.exists({
+          org_id: orgObjectId,
+          user_id: viewerObjectId,
+        }).exec(),
+        ViewModel.find({
+          user_id: viewerObjectId,
+          post_id: { $in: postIds },
+        })
+          .sort({ updated_at: -1 })
+          .limit(WATCH_HISTORY_EXCLUSION_LIMIT)
+          .select("post_id watch_time")
+          .lean()
+          .exec(),
+      ]);
+
+      membershipDoc = membership;
+
+      for (const view of viewDocs) {
+        const idStr = view.post_id?.toString?.();
+        if (!idStr || watchedIdStrings.has(idStr)) continue;
+        watchedIdStrings.add(idStr);
+        watchTimeMap.set(
+          idStr,
+          typeof view.watch_time === "number" ? view.watch_time : 0
+        );
+      }
+    } else {
+      membershipDoc = null;
+    }
+
+    const isMember = Boolean(membershipDoc);
+    const allowedVisibilities = (isMember
+      ? ["Public", "Organizations"]
+      : ["Public"]) as Visibility[];
+
+    const visibilityClauses: Record<string, unknown>[] = [];
+    if (allowedVisibilities.length === 1) {
+      visibilityClauses.push({ visibility: allowedVisibilities[0] });
+    } else {
+      visibilityClauses.push({ visibility: { $in: allowedVisibilities } });
+    }
+    if (viewerObjectId) {
+      visibilityClauses.push({ user_id: viewerObjectId });
+    }
+
+    const visibilityFilter =
+      visibilityClauses.length === 1
+        ? visibilityClauses[0]
+        : { $or: visibilityClauses };
+
+    const cursorExcludeIds = Array.isArray(cursor?.excludeIds)
+      ? cursor.excludeIds.filter(
+          (id): id is string =>
+            typeof id === "string" && Types.ObjectId.isValid(id)
+        )
+      : [];
+
+    const exclusionIdStrings = new Set<string>();
+    for (const id of watchedIdStrings) exclusionIdStrings.add(id);
+    for (const id of cursorExcludeIds) exclusionIdStrings.add(id);
+    const exclusionObjectIds = Array.from(exclusionIdStrings, (id) =>
+      new Types.ObjectId(id)
+    );
+
+    const basePostIdFilter = { _id: { $in: postIds } };
     const rangeFilter = buildCursorFilter(cursor);
-    const filter = { ...baseFilter, ...rangeFilter };
+    const filterParts: Record<string, unknown>[] = [
+      basePostIdFilter,
+      visibilityFilter,
+    ];
+
+    if (Object.keys(rangeFilter).length > 0) {
+      filterParts.push(rangeFilter);
+    }
+
+    if (exclusionObjectIds.length > 0) {
+      filterParts.push({ _id: { $nin: exclusionObjectIds } });
+    }
+
+    const filter =
+      filterParts.length === 1 ? filterParts[0] : { $and: filterParts };
+
     const sort = { created_at: -1 as const, _id: -1 as const };
+
+    let freshPosts: any[] = [];
+    if (cursor) {
+      const newerFilter = buildNewerThanCursorFilter(cursor);
+      if (Object.keys(newerFilter).length > 0) {
+        const freshParts: Record<string, unknown>[] = [
+          basePostIdFilter,
+          visibilityFilter,
+          newerFilter,
+        ];
+        if (exclusionObjectIds.length > 0) {
+          freshParts.push({ _id: { $nin: exclusionObjectIds } });
+        }
+        const freshFilter =
+          freshParts.length === 1 ? freshParts[0] : { $and: freshParts };
+        freshPosts = await PostModel.find(freshFilter)
+          .sort(sort)
+          .limit(limit + 1)
+          .exec();
+      }
+    }
 
     const posts = await PostModel.find(filter)
       .sort(sort)
       .limit(limit + 1)
       .exec();
 
-    const hasMore = posts.length > limit;
-    const pageItems = hasMore ? posts.slice(0, limit) : posts;
+    const hasMoreOlder = posts.length > limit;
+    const pageItems = hasMoreOlder ? posts.slice(0, limit) : posts;
 
-    if (pageItems.length === 0) {
-      return res
-        .status(200)
-        .json({ items: [], paging: { hasMore: false, nextCursor: null } });
+    const combinedCandidates: typeof pageItems = [];
+    const seenIds = new Set<string>();
+    for (const post of [...freshPosts, ...pageItems]) {
+      const id = post._id.toString();
+      if (exclusionIdStrings.has(id)) continue;
+      if (!seenIds.has(id)) {
+        seenIds.add(id);
+        combinedCandidates.push(post);
+      }
     }
 
-    const userIds = pageItems.map((p) => p.user_id);
-    const users = await UserModel.find({ _id: { $in: userIds } })
+    if (combinedCandidates.length === 0) {
+      return res.status(200).json({
+        items: [],
+        paging: { hasMore: false, nextCursor: null },
+      });
+    }
+
+    const nowMs = Date.now();
+    const jitterSeed = Math.random().toString(36).slice(2);
+    const orderedPosts = combinedCandidates
+      .map((post) => ({
+        post,
+        score: computePostScore(post, nowMs, jitterSeed),
+      }))
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        const bTime =
+          b.post.created_at instanceof Date
+            ? b.post.created_at.getTime()
+            : new Date(b.post.created_at).getTime();
+        const aTime =
+          a.post.created_at instanceof Date
+            ? a.post.created_at.getTime()
+            : new Date(a.post.created_at).getTime();
+        if (bTime !== aTime) return bTime - aTime;
+        return b.post._id.toString().localeCompare(a.post._id.toString());
+      })
+      .map((entry) => entry.post);
+
+    const responsePosts = orderedPosts.slice(0, limit);
+
+    if (responsePosts.length === 0) {
+      return res.status(200).json({
+        items: [],
+        paging: { hasMore: false, nextCursor: null },
+      });
+    }
+
+    const moreAvailable =
+      hasMoreOlder || orderedPosts.length > responsePosts.length;
+
+    const responseIds = responsePosts.map((p) => p._id);
+    const orgMap = new Map<string, string[]>();
+    if (responseIds.length > 0) {
+      const orgAssociations = await PostOrgModel.find({
+        post_id: { $in: responseIds },
+      })
+        .select("post_id org_id")
+        .lean()
+        .exec();
+      for (const assoc of orgAssociations) {
+        const key = assoc.post_id.toString();
+        const orgIdStr = assoc.org_id.toString();
+        const list = orgMap.get(key);
+        if (list) {
+          if (!list.includes(orgIdStr)) list.push(orgIdStr);
+        } else {
+          orgMap.set(key, [orgIdStr]);
+        }
+      }
+    }
+
+    const uniqueUserIds = Array.from(
+      new Set(responsePosts.map((p) => p.user_id.toString()))
+    ).map((id) => new Types.ObjectId(id));
+    const users = await UserModel.find({ _id: { $in: uniqueUserIds } })
       .lean()
       .exec();
     const userMap = new Map(users.map((u) => [u._id.toString(), u]));
 
-    const pagePostIds = pageItems.map((p) => p._id);
-    const orgAssociations = await PostOrgModel.find({
-      post_id: { $in: pagePostIds },
-    })
-      .select("post_id org_id")
-      .lean()
-      .exec();
-    const orgMap = new Map<string, string[]>();
-    for (const assoc of orgAssociations) {
-      const key = assoc.post_id.toString();
-      const list = orgMap.get(key);
-      const orgIdStr = assoc.org_id.toString();
-      if (list) {
-        if (!list.includes(orgIdStr)) list.push(orgIdStr);
-      } else {
-        orgMap.set(key, [orgIdStr]);
-      }
-    }
-
-    const postIdsForViewer = pageItems.map((p) => p._id.toString());
+    const responseIdStrings = responsePosts.map((p) => p._id.toString());
     let reactionMap = new Map<string, ReactionKey>();
     let savedSet = new Set<string>();
-    if (viewerId && postIdsForViewer.length > 0) {
+    if (viewerIdStr && responseIdStrings.length > 0) {
       const [reactions, saves] = await Promise.all([
         PostReactionModel.find({
-          post_id: { $in: postIdsForViewer },
-          user_id: viewerId,
+          post_id: { $in: responseIdStrings },
+          user_id: viewerIdStr,
         })
           .lean()
           .exec(),
         PostSaveModel.find({
-          post_id: { $in: postIdsForViewer },
-          user_id: viewerId,
+          post_id: { $in: responseIdStrings },
+          user_id: viewerIdStr,
         })
           .lean()
           .exec(),
@@ -705,15 +864,26 @@ export async function getFeedByOrganizationId(req: Request, res: Response) {
       savedSet = new Set(saves.map((s: any) => s.post_id.toString()));
     }
 
-    const items = pageItems.map((post) => {
+    const items = responsePosts.map((post) => {
       const id = post._id.toString();
-      const user = userMap.get(post.user_id.toString());
+      const userEntry = userMap.get(post.user_id.toString());
+      const viewerState: ViewerState = {
+        saved: savedSet.has(id),
+        reaction: reactionMap.get(id),
+      };
+      if (viewerIdStr) {
+        const watchTime = watchTimeMap.get(id);
+        viewerState.viewed = watchTime !== undefined;
+        if (watchTime !== undefined) {
+          viewerState.watchTime = watchTime;
+        }
+      }
       return {
         id,
         user: {
-          handle: user?.handle || "unknown",
-          name: user?.username || "Unknown User",
-          avatar: user?.picture_url || "https://i.pravatar.cc/100?img=1",
+          handle: userEntry?.handle || "unknown",
+          name: userEntry?.username || "Unknown User",
+          avatar: userEntry?.picture_url || "https://i.pravatar.cc/100?img=1",
         },
         caption: post.caption ?? "",
         music: post.music ?? "",
@@ -735,23 +905,40 @@ export async function getFeedByOrganizationId(req: Request, res: Response) {
         orgViewIds: orgMap.get(id) ?? [],
         createdAt: post.created_at?.toISOString() ?? new Date().toISOString(),
         updatedAt: post.updated_at?.toISOString() ?? new Date().toISOString(),
-        viewer: {
-          saved: savedSet.has(id),
-          reaction: reactionMap.get(id),
-        },
+        viewer: viewerState,
       } as PostDTO;
     });
 
-    const nextCursor = hasMore
-      ? encodeCursor({
-          createdAt: pageItems[pageItems.length - 1].created_at.toISOString(),
-          id: pageItems[pageItems.length - 1]._id.toString(),
-        })
-      : null;
+    let nextCursor: string | null = null;
+    if (moreAvailable && responsePosts.length > 0) {
+      const tail = responsePosts[responsePosts.length - 1];
+      const createdAtRaw =
+        tail.created_at instanceof Date
+          ? tail.created_at
+          : tail.created_at
+          ? new Date(tail.created_at)
+          : new Date();
+      const createdAt = Number.isNaN(createdAtRaw.getTime())
+        ? new Date()
+        : createdAtRaw;
+      const accumulatedExclude = Array.from(
+        new Set([...cursorExcludeIds, ...responseIdStrings])
+      );
+      const nextIssuedAt = cursor?.issuedAt ?? new Date().toISOString();
+      nextCursor = encodeCursor({
+        createdAt: createdAt.toISOString(),
+        id: tail._id.toString(),
+        issuedAt: nextIssuedAt,
+        excludeIds: accumulatedExclude,
+      });
+    }
 
     return res.status(200).json({
       items,
-      paging: { hasMore, nextCursor },
+      paging: {
+        hasMore: moreAvailable,
+        nextCursor,
+      },
     });
   } catch (error) {
     console.error("getFeedByOrganizationId error", error);
