@@ -12,9 +12,10 @@ import {
   PostSaveModel,
   UserEmailModel,
   UserModel,
+  ViewModel,
 } from "../models";
 
-type ReactionCursorToken = { createdAt: string; id: string };
+type CursorToken = { createdAt: string; id: string };
 
 function parseLimit(raw: unknown, def = 10, min = 1, max = 50) {
   if (typeof raw === "number" && Number.isFinite(raw)) {
@@ -33,11 +34,11 @@ function parseLimit(raw: unknown, def = 10, min = 1, max = 50) {
   return def;
 }
 
-function encodeCursor(cursor: ReactionCursorToken): string {
+function encodeCursor(cursor: CursorToken): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64");
 }
 
-function decodeCursor(raw?: string | null): ReactionCursorToken | null {
+function decodeCursor(raw?: string | null): CursorToken | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(Buffer.from(raw, "base64").toString("utf8"));
@@ -45,7 +46,7 @@ function decodeCursor(raw?: string | null): ReactionCursorToken | null {
       typeof parsed?.createdAt === "string" &&
       typeof parsed?.id === "string"
     ) {
-      return parsed as ReactionCursorToken;
+      return parsed as CursorToken;
     }
   } catch {
     // ignore malformed cursor
@@ -53,23 +54,33 @@ function decodeCursor(raw?: string | null): ReactionCursorToken | null {
   return null;
 }
 
-function buildReactionCursorFilter(cursor: ReactionCursorToken | null) {
+function buildCursorFilter(
+  cursor: CursorToken | null,
+  dateField: "created_at" | "updated_at" = "created_at"
+) {
   if (!cursor) return {};
 
   const createdAt = new Date(cursor.createdAt);
   if (Number.isNaN(createdAt.getTime())) return {};
 
+  const fieldKey = dateField;
+  const baseCondition = {
+    [fieldKey]: { $lt: createdAt },
+  } as Record<string, unknown>;
+
   if (!Types.ObjectId.isValid(cursor.id)) {
-    return { created_at: { $lt: createdAt } };
+    return baseCondition;
   }
 
   const reactionId = new Types.ObjectId(cursor.id);
+  const tieBreakerCondition = {
+    [fieldKey]: createdAt,
+    _id: { $lt: reactionId },
+  } as Record<string, unknown>;
+
   return {
-    $or: [
-      { created_at: { $lt: createdAt } },
-      { created_at: createdAt, _id: { $lt: reactionId } },
-    ],
-  };
+    $or: [baseCondition, tieBreakerCondition],
+  } as Record<string, unknown>;
 }
 
 // Get user profile by user ID
@@ -345,7 +356,7 @@ async function getSavedVideos(req: Request, res: Response) {
     const limit = parseLimit(req.query.limit, 10, 1, 50);
     const cursor = decodeCursor(req.query.cursor as string | undefined);
 
-    const cursorFilter = buildReactionCursorFilter(cursor);
+    const cursorFilter = buildCursorFilter(cursor);
     const saveFilter = { user_id: viewerId, ...cursorFilter } as Record<
       string,
       unknown
@@ -486,7 +497,7 @@ async function getReactedVideos(req: Request, res: Response) {
     const limit = parseLimit(req.query.limit, 10, 1, 50);
     const cursor = decodeCursor(req.query.cursor as string | undefined);
 
-    const cursorFilter = buildReactionCursorFilter(cursor);
+    const cursorFilter = buildCursorFilter(cursor);
     const reactionFilter = { user_id: viewerId, ...cursorFilter } as Record<
       string,
       unknown
@@ -610,6 +621,175 @@ async function getReactedVideos(req: Request, res: Response) {
     });
   } catch (error) {
     console.error("Error in getReactedVideos:", error);
+    return res.status(500).json({ message: "Something went wrong!" });
+  }
+}
+
+async function getViewedVideos(req: Request, res: Response) {
+  try {
+    const reqAny = req as any;
+    const viewerIdRaw = reqAny.user?.id;
+    const viewerId =
+      typeof viewerIdRaw === "string" ? viewerIdRaw : viewerIdRaw?.toString?.();
+    if (!viewerId) return res.status(401).json({ message: "Unauthorized" });
+
+    const limit = parseLimit(req.query.limit, 10, 1, 50);
+    const cursor = decodeCursor(req.query.cursor as string | undefined);
+
+    const cursorFilter = buildCursorFilter(cursor, "updated_at");
+    const viewFilter = { user_id: viewerId, ...cursorFilter } as Record<
+      string,
+      unknown
+    >;
+
+    const views = await ViewModel.find(viewFilter)
+      .sort({ updated_at: -1, _id: -1 })
+      .limit(limit + 1)
+      .lean()
+      .exec();
+
+    const hasMore = views.length > limit;
+    const pageViews = hasMore ? views.slice(0, limit) : views;
+
+    const postIds = Array.from(
+      new Set(pageViews.map((view: any) => String(view.post_id)))
+    );
+    const posts = await PostModel.find({ _id: { $in: postIds } })
+      .lean()
+      .exec();
+    const postMap = new Map(
+      posts.map((post: any) => [post._id.toString(), post])
+    );
+
+    const authorIds = Array.from(
+      new Set(posts.map((post: any) => String(post.user_id)))
+    );
+    const authors = await UserModel.find({ _id: { $in: authorIds } })
+      .lean()
+      .exec();
+    const authorMap = new Map(
+      authors.map((author: any) => [author._id.toString(), author])
+    );
+
+    let reactionMap = new Map<string, string>();
+    let savedSet = new Set<string>();
+    if (postIds.length > 0) {
+      const [reactions, saves] = await Promise.all([
+        PostReactionModel.find({
+          post_id: { $in: postIds },
+          user_id: viewerId,
+        })
+          .lean()
+          .exec(),
+        PostSaveModel.find({ post_id: { $in: postIds }, user_id: viewerId })
+          .lean()
+          .exec(),
+      ]);
+      reactionMap = new Map(
+        reactions.map((reaction: any) => [
+          String(reaction.post_id),
+          reaction.key,
+        ])
+      );
+      savedSet = new Set(saves.map((save: any) => String(save.post_id)));
+    }
+
+    const items = pageViews
+      .map((view: any) => {
+        const post = postMap.get(String(view.post_id));
+        if (!post) return null;
+
+        const author = authorMap.get(String(post.user_id));
+        const postId = post._id.toString();
+        const lastViewedAt =
+          view.updated_at instanceof Date
+            ? view.updated_at.toISOString()
+            : new Date(
+                view.updated_at ?? view.created_at ?? Date.now()
+              ).toISOString();
+        const firstViewedAt =
+          view.created_at instanceof Date
+            ? view.created_at.toISOString()
+            : new Date(view.created_at ?? Date.now()).toISOString();
+        const watchTime =
+          typeof view.watch_time === "number" &&
+          Number.isFinite(view.watch_time)
+            ? view.watch_time
+            : 0;
+
+        return {
+          postId,
+          viewId: String(view._id),
+          viewedAt: lastViewedAt,
+          firstViewedAt,
+          watchTime,
+          post: {
+            id: postId,
+            user: {
+              id: String(post.user_id),
+              handle: author?.handle || "unknown",
+              name: author?.username || "Unknown User",
+              avatar: author?.picture_url || "https://i.pravatar.cc/100?img=1",
+            },
+            caption: post.caption ?? "",
+            music: post.music ?? "",
+            interactions: {
+              like: post.like_count ?? 0,
+              love: post.love_count ?? 0,
+              haha: post.haha_count ?? 0,
+              sad: post.sad_count ?? 0,
+              angry: post.angry_count ?? 0,
+            },
+            comments: post.comments_count ?? 0,
+            saves: post.saves_count ?? 0,
+            thumbnail: post.thumbnail ?? "",
+            tags: Array.isArray(post.tags) ? post.tags : [],
+            videoSrc: post.video_src ?? "",
+            visibility: post.visibility,
+            allowComments: post.allow_comments,
+            createdAt:
+              post.created_at instanceof Date
+                ? post.created_at.toISOString()
+                : new Date(post.created_at ?? Date.now()).toISOString(),
+            updatedAt:
+              post.updated_at instanceof Date
+                ? post.updated_at.toISOString()
+                : new Date(post.updated_at ?? Date.now()).toISOString(),
+            viewer: {
+              reaction: reactionMap.get(postId) || null,
+              saved: savedSet.has(postId),
+              viewed: true,
+              watchTime,
+              lastViewedAt,
+            },
+          },
+        };
+      })
+      .filter(Boolean);
+
+    const lastView = pageViews[pageViews.length - 1];
+    const nextCursor =
+      hasMore && lastView?.updated_at
+        ? encodeCursor({
+            createdAt:
+              lastView.updated_at instanceof Date
+                ? lastView.updated_at.toISOString()
+                : new Date(
+                    lastView.updated_at ?? lastView.created_at ?? Date.now()
+                  ).toISOString(),
+            id: lastView._id.toString(),
+          })
+        : null;
+
+    return res.status(200).json({
+      items,
+      paging: {
+        hasMore,
+        nextCursor,
+      },
+    });
+  } catch (error) {
+    console.error("Error in getViewedVideos:", error);
     return res.status(500).json({ message: "Something went wrong!" });
   }
 }
@@ -816,6 +996,7 @@ export {
   followUser,
   getEmails,
   getReactedVideos,
+  getViewedVideos,
   getUserProfile,
   getSavedVideos,
   getUserOrganizations,

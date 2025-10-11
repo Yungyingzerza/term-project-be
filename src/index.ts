@@ -24,6 +24,7 @@ import feedRouter from "./controllers/feed.routes";
 import mediaRouter from "./controllers/media.routes";
 import userRouter from "./controllers/user.routes";
 import organizationRouter from "./controllers/organization.routes";
+import exploreRouter from "./controllers/explore.routes";
 
 //setup middlewares
 app.use(cookieParser());
@@ -55,6 +56,7 @@ app.use("/feed", feedRouter);
 app.use("/media", mediaRouter);
 app.use("/user", userRouter);
 app.use("/organization", organizationRouter);
+app.use("/explore", exploreRouter);
 
 //-=-=-=-=-should edit above this line to add your routes-=-=-=-=-//
 
