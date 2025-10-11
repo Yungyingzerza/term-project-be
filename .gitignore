@@ -1,3 +1,5 @@
 node_modules
 .env
 temp/
+seeders/usersWithIds.json
+seeders/uploadedVideos.json

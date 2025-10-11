@@ -8,7 +8,7 @@ import usersWithIds from "./usersWithIds.json";
 import captions from "./captions.json";
 
 // Configuration
-const API_URL = process.env.API_URL || "http://localhost:8000";
+const API_URL = process.env.API_URL || "https://api.yungying.com/chillchill";
 const VIDEOS_DIR = "/Users/yungyingzerza/Downloads/Mock Video";
 const UPLOAD_ENDPOINT = `${API_URL}/media/upload/mock`;
 const UPLOADED_VIDEOS_FILE = path.join(__dirname, "uploadedVideos.json");
