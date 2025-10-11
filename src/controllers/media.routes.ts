@@ -77,9 +77,9 @@ mediaRouter.post("/upload", upload.single("video"), async (req, res) => {
 // Optional (same as regular upload):
 //   - caption, music, tags, visibility, allowComments, orgIds
 // ============================================================================
-mediaRouter.post("/upload/mock", upload.single("video"), async (req, res) => {
-  await services.uploadVideoMock(req, res);
-});
+// mediaRouter.post("/upload/mock", upload.single("video"), async (req, res) => {
+//   await services.uploadVideoMock(req, res);
+// });
 
 mediaRouter.post(
   "/upload/profile",
