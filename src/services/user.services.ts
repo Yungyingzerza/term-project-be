@@ -904,6 +904,8 @@ async function createEmail(req: Request, res: Response) {
         organization = await OrganizationModel.create({
           name: emailDomain.split(".")[0],
           domains: [emailDomain],
+          is_work_org: true,
+          description: "",
         });
         await OrganizationMembershipModel.create({
           user_id: reqAny.user.id,
