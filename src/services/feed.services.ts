@@ -158,10 +158,7 @@ function computePostScore(
     post.created_at instanceof Date
       ? post.created_at
       : new Date(post.created_at);
-  const ageHours = Math.max(
-    0,
-    (nowMs - createdAt.getTime()) / HOUR_IN_MS
-  );
+  const ageHours = Math.max(0, (nowMs - createdAt.getTime()) / HOUR_IN_MS);
   const recencyScore = Math.exp(-ageHours / 12) * 24;
 
   const totalReactions =
@@ -187,7 +184,12 @@ function computePostScore(
 export async function getFeed(req: Request, res: Response) {
   try {
     const algoRaw = (req.query.algo as string) || "for-you";
-    const algo = algoRaw === "following" ? "following" : "for-you";
+    const algo =
+      algoRaw === "following"
+        ? "following"
+        : algoRaw === "friends"
+        ? "friends"
+        : "for-you";
 
     const limit = parseLimit(req.query.limit);
     const cursor = decodeCursor(req.query.cursor as string | undefined);
@@ -279,8 +281,9 @@ export async function getFeed(req: Request, res: Response) {
     for (const id of cursorExcludeIds) {
       exclusionIdStrings.add(id);
     }
-    const exclusionObjectIds = Array.from(exclusionIdStrings, (id) =>
-      new Types.ObjectId(id)
+    const exclusionObjectIds = Array.from(
+      exclusionIdStrings,
+      (id) => new Types.ObjectId(id)
     );
 
     const friendSet = new Set(friendIds.map((id) => id.toString()));
@@ -321,6 +324,27 @@ export async function getFeed(req: Request, res: Response) {
           visibility: "Organizations" as Visibility,
         });
       }
+    } else if (algo === "friends") {
+      if (!viewerObjectId) {
+        return res.status(200).json({
+          algo,
+          items: [],
+          paging: { hasMore: false, nextCursor: null },
+        });
+      }
+
+      if (friendIds.length === 0) {
+        return res.status(200).json({
+          algo,
+          items: [],
+          paging: { hasMore: false, nextCursor: null },
+        });
+      }
+
+      visibilityClauses.push({
+        user_id: { $in: friendIds },
+        visibility: { $in: ["Public", "Friends"] as Visibility[] },
+      });
     } else {
       visibilityClauses.push({ visibility: "Public" as Visibility });
       if (viewerObjectId) {
@@ -677,9 +701,9 @@ export async function getFeedByOrganizationId(req: Request, res: Response) {
     }
 
     const isMember = Boolean(membershipDoc);
-    const allowedVisibilities = (isMember
-      ? ["Public", "Organizations"]
-      : ["Public"]) as Visibility[];
+    const allowedVisibilities = (
+      isMember ? ["Public", "Organizations"] : ["Public"]
+    ) as Visibility[];
 
     const visibilityClauses: Record<string, unknown>[] = [];
     if (allowedVisibilities.length === 1) {
@@ -706,8 +730,9 @@ export async function getFeedByOrganizationId(req: Request, res: Response) {
     const exclusionIdStrings = new Set<string>();
     for (const id of watchedIdStrings) exclusionIdStrings.add(id);
     for (const id of cursorExcludeIds) exclusionIdStrings.add(id);
-    const exclusionObjectIds = Array.from(exclusionIdStrings, (id) =>
-      new Types.ObjectId(id)
+    const exclusionObjectIds = Array.from(
+      exclusionIdStrings,
+      (id) => new Types.ObjectId(id)
     );
 
     const basePostIdFilter = { _id: { $in: postIds } };
@@ -1551,7 +1576,10 @@ export async function getCommentsByPostId(req: Request, res: Response) {
       buildCursorFilter(cursor),
       { deleted_at: { $exists: false } },
       {
-        $or: [{ parent_comment_id: { $exists: false } }, { parent_comment_id: null }],
+        $or: [
+          { parent_comment_id: { $exists: false } },
+          { parent_comment_id: null },
+        ],
       },
     ];
 
@@ -1699,8 +1727,7 @@ export async function getRepliesByCommentId(req: Request, res: Response) {
         ? new Types.ObjectId(viewerId)
         : null;
     const isOwner = viewerId && viewerId === post.user_id?.toString();
-    const isParentAuthor =
-      viewerId && viewerId === parent.user_id?.toString();
+    const isParentAuthor = viewerId && viewerId === parent.user_id?.toString();
 
     if (!isOwner && parent.visibility === "OwnerOnly" && !isParentAuthor) {
       return res

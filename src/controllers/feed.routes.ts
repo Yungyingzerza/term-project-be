@@ -4,7 +4,7 @@ import getUserIdFromToken from "../middlewares/getUserIdFromToken";
 const feedRouter = express.Router();
 feedRouter.use(getUserIdFromToken);
 
-// GET /feed?algo=for-you|following&limit&cursor
+// GET /feed?algo=for-you|following|friends&limit&cursor
 feedRouter.get("/", async (req, res) => {
   await services.getFeed(req, res);
 });
