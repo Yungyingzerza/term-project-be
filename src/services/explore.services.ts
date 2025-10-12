@@ -92,12 +92,16 @@ function decodeCursor(raw?: string | null): number {
   return 0;
 }
 
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function searchUsers(
   query: string,
   limit: number,
   skip: number
 ): Promise<UserResult[]> {
-  const searchRegex = new RegExp(query, "i");
+  const searchRegex = new RegExp(escapeRegex(query), "i");
 
   const users = await UserModel.find({
     $or: [{ username: searchRegex }, { handle: searchRegex }],
@@ -120,7 +124,7 @@ async function searchOrganizations(
   limit: number,
   skip: number
 ): Promise<OrganizationResult[]> {
-  const searchRegex = new RegExp(query, "i");
+  const searchRegex = new RegExp(escapeRegex(query), "i");
 
   const orgs = await OrganizationModel.find({
     name: searchRegex,
@@ -145,7 +149,7 @@ async function searchPosts(
 ): Promise<PostResult[]> {
   // Handle hashtag search - remove # if present
   const cleanQuery = query.startsWith("#") ? query.slice(1) : query;
-  const searchRegex = new RegExp(cleanQuery, "i");
+  const searchRegex = new RegExp(escapeRegex(cleanQuery), "i");
 
   // Search in caption and tags (hashtags), and only include Public posts
   const posts = await PostModel.find({
