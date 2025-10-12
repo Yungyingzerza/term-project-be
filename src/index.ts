@@ -25,6 +25,7 @@ import mediaRouter from "./controllers/media.routes";
 import userRouter from "./controllers/user.routes";
 import organizationRouter from "./controllers/organization.routes";
 import exploreRouter from "./controllers/explore.routes";
+import messageRouter from "./controllers/message.routes";
 
 //setup middlewares
 app.use(cookieParser());
@@ -57,8 +58,20 @@ app.use("/media", mediaRouter);
 app.use("/user", userRouter);
 app.use("/organization", organizationRouter);
 app.use("/explore", exploreRouter);
+app.use("/messages", messageRouter);
 
 //-=-=-=-=-should edit above this line to add your routes-=-=-=-=-//
+
+//test sign jwt access token
+import jwt from "jsonwebtoken";
+const accessToken = jwt.sign(
+  {
+    sub: "68c6c88e229b043398774b66",
+  },
+  process.env.JWT_SECRET || "default",
+  { expiresIn: "5m" }
+);
+console.log("Test JWT Access Token:", accessToken);
 
 app.listen(process.env.PORT, () => {
   console.log(`Server is running at http://localhost:${process.env.PORT}`);
