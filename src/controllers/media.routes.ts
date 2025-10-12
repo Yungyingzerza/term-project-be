@@ -89,6 +89,10 @@ mediaRouter.post(
   }
 );
 
+mediaRouter.delete("/video/:postId", async (req, res) => {
+  await services.deleteVideo(req, res);
+});
+
 // HEAD for metadata probing (length, type, ranges)
 // mediaRouter.head("/:bucket{/*path}", async (req, res) => {
 //   await services.headObject(req, res);

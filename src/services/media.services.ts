@@ -1023,3 +1023,91 @@ export async function profilePhoto(req: Request, res: Response) {
     return res.status(500).json({ message: "Failed to stream profile image" });
   }
 }
+
+export async function deleteVideo(req: Request, res: Response) {
+  try {
+    const reqAny = req as any;
+    const userId = reqAny.user?.id;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+    const { postId } = req.params as { postId: string };
+    if (!postId || !Types.ObjectId.isValid(postId)) {
+      return res.status(400).json({ message: "Invalid post ID" });
+    }
+
+    const post = await PostModel.findById(postId).exec();
+    if (!post) return res.status(404).json({ message: "Post not found" });
+
+    // Verify ownership
+    if (post.user_id.toString() !== userId.toString()) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    const bucket = process.env.MINIO_BUCKET || "users";
+    const userIdStr = post.user_id.toString();
+
+    // Extract video and thumbnail paths from the post
+    const videoSrc = post.video_src;
+    const thumbnailSrc = post.thumbnail;
+
+    // Delete from MinIO
+    const deletePromises: Promise<any>[] = [];
+
+    if (videoSrc) {
+      try {
+        // Extract object key from video URL
+        // Expected format: .../media/{userId}/{postId}/{postId}.mp4
+        const videoMatch = videoSrc.match(/media\/[^\/]+\/[^\/]+\/(.+)$/);
+        if (videoMatch) {
+          const objectKey = `${userIdStr}/${postId}/${postId}.mp4`;
+          deletePromises.push(
+            minioClient.removeObject(bucket, objectKey).catch((err) => {
+              console.warn(`Failed to delete video from MinIO: ${err.message}`);
+            })
+          );
+        }
+      } catch (err) {
+        console.warn("Error parsing video path", err);
+      }
+    }
+
+    if (thumbnailSrc) {
+      try {
+        // Extract object key from thumbnail URL
+        // Expected format: .../media/photo/{userId}/{postId}/{postId}.jpg
+        const thumbMatch = thumbnailSrc.match(
+          /media\/photo\/[^\/]+\/[^\/]+\/(.+)$/
+        );
+        if (thumbMatch) {
+          const objectKey = `${userIdStr}/${postId}/${postId}.jpg`;
+          deletePromises.push(
+            minioClient.removeObject(bucket, objectKey).catch((err) => {
+              console.warn(
+                `Failed to delete thumbnail from MinIO: ${err.message}`
+              );
+            })
+          );
+        }
+      } catch (err) {
+        console.warn("Error parsing thumbnail path", err);
+      }
+    }
+
+    // Wait for MinIO deletions (best effort)
+    await Promise.all(deletePromises);
+
+    // Delete the post from database
+    await PostModel.findByIdAndDelete(postId).exec();
+
+    return res.status(200).json({
+      message: "Video deleted successfully",
+      postId,
+    });
+  } catch (error: any) {
+    console.error("deleteVideo error", error);
+    return res.status(500).json({
+      message: "Failed to delete video",
+      error: error?.message || String(error),
+    });
+  }
+}
