@@ -63,15 +63,15 @@ app.use("/messages", messageRouter);
 //-=-=-=-=-should edit above this line to add your routes-=-=-=-=-//
 
 //test sign jwt access token
-import jwt from "jsonwebtoken";
-const accessToken = jwt.sign(
-  {
-    sub: "68c6c88e229b043398774b66",
-  },
-  process.env.JWT_SECRET || "default",
-  { expiresIn: "5m" }
-);
-console.log("Test JWT Access Token:", accessToken);
+// import jwt from "jsonwebtoken";
+// const accessToken = jwt.sign(
+//   {
+//     sub: "68c6c88e229b043398774b66",
+//   },
+//   process.env.JWT_SECRET || "default",
+//   { expiresIn: "1d" }
+// );
+// console.log("Test JWT Access Token:", accessToken);
 
 app.listen(process.env.PORT, () => {
   console.log(`Server is running at http://localhost:${process.env.PORT}`);
