@@ -12,6 +12,9 @@ export type { Organization } from "./organization.model";
 export { OrganizationMembershipModel } from "./organizationMembership.model";
 export type { OrganizationMembership } from "./organizationMembership.model";
 
+export { OrganizationInviteModel } from "./organizationInvite.model";
+export type { OrganizationInvite } from "./organizationInvite.model";
+
 export { PostModel } from "./post.model";
 export type { Post } from "./post.model";
 
