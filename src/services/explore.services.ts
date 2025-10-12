@@ -24,6 +24,7 @@ type OrganizationResult = {
   id: string;
   name: string;
   logoUrl: string;
+  isWorkOrg: boolean; // true = organization, false = group
 };
 
 type PostResult = {
@@ -138,6 +139,7 @@ async function searchOrganizations(
     id: org._id.toString(),
     name: org.name,
     logoUrl: org.logo_url || "",
+    isWorkOrg: org.is_work_org || false, // true = organization, false = group
   }));
 }
 
