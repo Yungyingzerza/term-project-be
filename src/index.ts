@@ -47,7 +47,7 @@ app.use(express.json({ limit: "100mb" }));
 //-=-=-=-should edit below this line to add your routes-=-=-=-=-//
 app.get("/", (req, res) => {
   res.json({
-    version: "1.0.1",
+    version: "1.0.2",
   });
 });
 
