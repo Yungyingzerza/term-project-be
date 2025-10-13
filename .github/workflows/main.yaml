@@ -1,0 +1,40 @@
+name: Build & Deploy Backend to Kubernetes
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-push-deploy:
+    runs-on: self-hosted
+
+    env:
+      IMAGE_NAME: localhost:5000/chillchill-backend:latest
+      BUILD_DIR: .
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Copy .env to build folder
+        run: cp /home/github-runner/PF-BE-Runner/backend.env $BUILD_DIR/.env
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.BUILD_DIR }}
+          push: true
+          tags: ${{ env.IMAGE_NAME }}
+          builder: default
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: "latest"
+
+      - name: Rollout Restart backend Deployment
+        run: kubectl rollout restart deployment chillchill-backend
