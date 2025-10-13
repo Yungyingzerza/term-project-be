@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Copy .env to build folder
-        run: cp /home/github-runner/PF-BE-Runner/backend.env $BUILD_DIR/.env
+        run: cp /home/github-runner/chillchill-runner-be/backend.env $BUILD_DIR/.env
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
